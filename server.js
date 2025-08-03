@@ -26,7 +26,7 @@ async function initializeDataDir() {
     'users.json': '{}',
     'emails.json': '{}',
     'clicks.json': '{}',
-    'tokens.json': '{}'  // ← Added: Token storage
+    'tokens.json': '{}'
   };
 
   for (const [filename, content] of Object.entries(files)) {
@@ -62,7 +62,7 @@ function generateToken() {
 }
 
 // ======================
-// 🌐 CORS Setup (NO EXTRA SPACES!)
+// 🌐 CORS Setup (NO TRAILING SPACES!)
 // ======================
 const ALLOWED_ORIGINS = [
   'https://hostnet.ct.ws',
@@ -73,9 +73,14 @@ const ALLOWED_ORIGINS = [
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (!origin || ALLOWED_ORIGINS.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
+
+  // Only allow origins in the list
+  if (origin && !ALLOWED_ORIGINS.includes(origin)) {
+    return res.status(403).json({ error: 'CORS not allowed' });
   }
+
+  // Set allowed origin (or default to *)
+  res.setHeader('Access-Control-Allow-Origin', origin || '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
@@ -83,22 +88,17 @@ app.use((req, res, next) => {
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
+
   next();
 });
 
 app.use(express.json());
 
 // ======================
-// 📂 Serve Static Files (Important!)
-// ======================
-// This allows /u.php, /index.php, etc. to be accessed via proxy or CDN
-app.use(express.static('public')); // Optional: for favicon, etc.
-
-// ======================
 // 📝 API Routes
 // ======================
 
-// GET /api/user/:id → Get user profile
+// GET /api/user/:id
 app.get('/api/user/:id', async (req, res) => {
   try {
     const users = await readJSON('users.json');
@@ -110,12 +110,11 @@ app.get('/api/user/:id', async (req, res) => {
   }
 });
 
-// POST /api/user/:id → Save user + email + generate token
+// POST /api/user/:id → Save user + email + return token
 app.post('/api/user/:id', async (req, res) => {
   const { username, email, ...profile } = req.body;
   const userId = req.params.id;
 
-  // Validate username
   if (!/^[a-zA-Z0-9_]{3,20}$/.test(userId)) {
     return res.status(400).json({ error: 'Invalid username' });
   }
@@ -135,21 +134,21 @@ app.post('/api/user/:id', async (req, res) => {
     emails[userId] = { email, joined: new Date().toISOString() };
     await writeJSON('emails.json', emails);
 
-    // Generate and save edit token if not exists
+    // Generate token if not exists
     let tokens = await readJSON('tokens.json');
     if (!tokens[userId]) {
       tokens[userId] = generateToken();
       await writeJSON('tokens.json', tokens);
     }
 
-    // Notify real-time clients
+    // Notify clients
     io.emit('update:' + userId);
 
-    // ✅ Return token so frontend can redirect securely
+    // ✅ Return token for secure redirect
     res.json({
       success: true,
       message: 'Profile saved!',
-      token: tokens[userId]  // ← Critical: Return token
+      token: tokens[userId]
     });
 
   } catch (err) {
@@ -158,7 +157,7 @@ app.post('/api/user/:id', async (req, res) => {
   }
 });
 
-// GET /api/token/:id → Get edit token
+// GET /api/token/:id
 app.get('/api/token/:id', async (req, res) => {
   try {
     const tokens = await readJSON('tokens.json');
@@ -173,7 +172,7 @@ app.get('/api/token/:id', async (req, res) => {
   }
 });
 
-// GET /redirect/:user/:url → Track click & redirect
+// GET /redirect/:user/:url
 app.get('/redirect/:user/:url', async (req, res) => {
   const { user, url } = req.params;
   const decodedUrl = decodeURIComponent(url);
@@ -183,7 +182,6 @@ app.get('/redirect/:user/:url', async (req, res) => {
     clicks[user] = clicks[user] || {};
     clicks[user][decodedUrl] = (clicks[user][decodedUrl] || 0) + 1;
     await writeJSON('clicks.json', clicks);
-
     io.emit('click:' + user, { url: decodedUrl, count: clicks[user][decodedUrl] });
   } catch (err) {
     console.error('Tracking failed:', err);
@@ -192,38 +190,13 @@ app.get('/redirect/:user/:url', async (req, res) => {
   }
 });
 
-// GET /api/stats/:user → Click stats
-app.get('/api/stats/:user', async (req, res) => {
-  try {
-    const clicks = await readJSON('clicks.json');
-    res.json(clicks[req.params.user] || {});
-  } catch (err) {
-    res.status(500).json({ error: 'Could not load stats' });
-  }
-});
-
-// GET /api/users → List all usernames
-app.get('/api/users', async (req, res) => {
-  try {
-    const users = await readJSON('users.json');
-    res.json(Object.keys(users));
-  } catch (err) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
 // ======================
-// 🔌 WebSocket Real-Time Updates
+// 🔌 WebSocket
 // ======================
 io.on('connection', (socket) => {
   console.log('🟢 Client connected:', socket.id);
-
   socket.on('disconnect', () => {
     console.log('🔴 Client disconnected:', socket.id);
-  });
-
-  socket.on('join', (room) => {
-    socket.join(room);
   });
 });
 
@@ -236,13 +209,7 @@ async function startServer() {
 
   http.listen(PORT, () => {
     console.log(`✅ HostNet Bio API is live on port ${PORT}`);
-    console.log(`🌐 Access your service at:`);
-    console.log(`   - https://hostnet.ct.ws`);
-    console.log(`   - https://hostnetapi.onrender.com`);
-    console.log(`🔒 API Endpoints:`);
-    console.log(`   - POST /api/user/:id (returns token)`);
-    console.log(`   - GET  /api/token/:id`);
-    console.log(`   - GET  /redirect/:user/:url`);
+    console.log(`🌐 Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`);
   });
 }
 
@@ -252,19 +219,6 @@ startServer().catch(console.error);
 // 🛑 Graceful Shutdown
 // ======================
 process.on('SIGTERM', () => {
-  console.log('🛑 Shutting down gracefully...');
-  http.close(() => {
-    console.log('⏹️ HTTP server closed.');
-    process.exit(0);
-  });
-});
-
-process.on('unhandledRejection', (err) => {
-  console.error('Unhandled Rejection:', err);
-  process.exit(1);
-});
-
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception:', err);
-  process.exit(1);
+  console.log('🛑 Shutting down...');
+  http.close(() => process.exit(0));
 });
