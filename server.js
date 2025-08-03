@@ -1,320 +1,478 @@
-// server.js - HostNet Bio API (Final & Secure)
+// server.js
 const express = require('express');
-const fs = require('fs').promises;
-const path = require('path');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const fs = require('fs').promises;
+const path = require('path');
+const cors = require('cors');
+const rateLimit = require('express-rate-limit');
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
-const http = require('http').createServer(app);
-
-// ======================
-// 🔐 Config
-// ======================
 const PORT = process.env.PORT || 3000;
-const DATA_DIR = path.join(__dirname, 'data');
-const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production';
 
-// Initialize data directory
-async function initializeDataDir() {
+// Middleware
+app.use(express.json());
+app.use(cors({
+  origin: ['https://hostnet.wiki', 'https://www.hostnet.wiki'],
+  credentials: true
+}));
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: 'Too many requests from this IP'
+});
+app.use(limiter);
+
+// Data directory
+const DATA_DIR = './data';
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const PROFILES_FILE = path.join(DATA_DIR, 'profiles.json');
+const EMAILS_FILE = path.join(DATA_DIR, 'emails.json');
+const USERNAME_HISTORY_FILE = path.join(DATA_DIR, 'username_history.json');
+const CLICKS_FILE = path.join(DATA_DIR, 'clicks.json');
+const RATE_LIMITS_FILE = path.join(DATA_DIR, 'rate_limits.json');
+
+// Ensure data directory exists
+async function ensureDataDirectory() {
   try {
     await fs.access(DATA_DIR);
   } catch {
     await fs.mkdir(DATA_DIR, { recursive: true });
   }
-
-  const files = {
-    'users.json': '{}',        // username → { email, password_hash }
-    'profiles.json': '{}',     // username → { name, avatar, links }
-    'emails.json': '{}',       // email → username (permanent)
-    'clicks.json': '{}'        // user → { url: count }
-  };
-
-  for (const [filename, content] of Object.entries(files)) {
-    const filePath = path.join(DATA_DIR, filename);
-    try {
-      await fs.access(filePath);
-    } catch {
-      await fs.writeFile(filePath, content, 'utf8');
-      console.log(`✅ Created ${filename}`);
-    }
-  }
 }
 
-// ======================
-// 🛠️ Utils
-// ======================
-async function readJSON(filename) {
-  const content = await fs.readFile(path.join(DATA_DIR, filename), 'utf8');
-  return JSON.parse(content);
-}
-
-async function writeJSON(filename, data) {
-  await fs.writeFile(
-    path.join(DATA_DIR, filename),
-    JSON.stringify(data, null, 2),
-    'utf8'
-  );
-}
-
-// ======================
-// 🌐 CORS Setup
-// ======================
-const ALLOWED_ORIGINS = [
-  'https://hostnet.wiki',
-  'https://www.hostnet.wiki',
-  'https://hostnet.ct.ws',
-  'http://localhost:5173'
-];
-
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-
-  if (origin && ALLOWED_ORIGINS.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  } else if (!origin) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-  } else {
-    return res.status(403).json({ error: 'CORS not allowed' });
-  }
-
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
-
-  next();
-});
-
-app.use(express.json());
-
-// ======================
-// 🔐 Auth Middleware
-// ======================
-function authenticateToken(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
-
-  if (!token) {
-    return res.status(401).json({ error: 'Access denied. No token provided.' });
-  }
-
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) {
-      return res.status(403).json({ error: 'Invalid or expired token.' });
-    }
-    req.user = user;
-    next();
-  });
-}
-
-// ======================
-// 📝 API Routes
-// ======================
-
-// POST /api/register
-app.post('/api/register', async (req, res) => {
-  const { username, email, password } = req.body;
-
-  if (!username || !email || !password) {
-    return res.status(400).json({ error: 'All fields required.' });
-  }
-
-  if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
-    return res.status(400).json({ error: 'Username must be 3–20 characters: letters, numbers, underscore.' });
-  }
-
-  if (password.length < 6) {
-    return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
-  }
-
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ error: 'Please enter a valid email address.' });
-  }
-
+// Initialize data files with defaults
+async function initializeDataFiles() {
   try {
-    const users = await readJSON('users.json');
-    const emails = await readJSON('emails.json');
-
-    if (users[username]) {
-      return res.status(400).json({ error: 'Username already taken.' });
+    // Users file
+    try {
+      await fs.access(USERS_FILE);
+    } catch {
+      await fs.writeFile(USERS_FILE, '{}');
     }
 
+    // Profiles file
+    try {
+      await fs.access(PROFILES_FILE);
+    } catch {
+      await fs.writeFile(PROFILES_FILE, '{}');
+    }
+
+    // Emails file
+    try {
+      await fs.access(EMAILS_FILE);
+    } catch {
+      await fs.writeFile(EMAILS_FILE, '{}');
+    }
+
+    // Username history file
+    try {
+      await fs.access(USERNAME_HISTORY_FILE);
+    } catch {
+      await fs.writeFile(USERNAME_HISTORY_FILE, '{}');
+    }
+
+    // Clicks file
+    try {
+      await fs.access(CLICKS_FILE);
+    } catch {
+      await fs.writeFile(CLICKS_FILE, '{}');
+    }
+
+    // Rate limits file
+    try {
+      await fs.access(RATE_LIMITS_FILE);
+    } catch {
+      await fs.writeFile(RATE_LIMITS_FILE, '{}');
+    }
+  } catch (err) {
+    console.error('Error initializing data files:', err);
+  }
+}
+
+// Helper functions
+async function readJSONFile(filePath) {
+  try {
+    const data = await fs.readFile(filePath, 'utf8');
+    return JSON.parse(data);
+  } catch (err) {
+    return {};
+  }
+}
+
+async function writeJSONFile(filePath, data) {
+  try {
+    await fs.writeFile(filePath, JSON.stringify(data, null, 2));
+    return true;
+  } catch (err) {
+    console.error(`Error writing to ${filePath}:`, err);
+    return false;
+  }
+}
+
+async function atomicWrite(filePath, data) {
+  const tempPath = `${filePath}.tmp`;
+  try {
+    await fs.writeFile(tempPath, JSON.stringify(data, null, 2));
+    await fs.rename(tempPath, filePath);
+    return true;
+  } catch (err) {
+    console.error(`Atomic write failed for ${filePath}:`, err);
+    try {
+      await fs.unlink(tempPath);
+    } catch {}
+    return false;
+  }
+}
+
+function generateJWT(payload) {
+  const secret = process.env.JWT_SECRET || 'default_secret_key';
+  return jwt.sign(payload, secret, { expiresIn: '24h' });
+}
+
+function verifyJWT(token) {
+  const secret = process.env.JWT_SECRET || 'default_secret_key';
+  try {
+    return jwt.verify(token, secret);
+  } catch (err) {
+    return null;
+  }
+}
+
+// Validation helpers
+function validateUsername(username) {
+  if (!username || username.length < 3 || username.length > 20) {
+    return 'Username must be between 3 and 20 characters';
+  }
+  if (!/^[a-zA-Z0-9_]+$/.test(username)) {
+    return 'Username can only contain letters, numbers, and underscores';
+  }
+  return null;
+}
+
+function validateEmail(email) {
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!email || !emailRegex.test(email)) {
+    return 'Invalid email format';
+  }
+  return null;
+}
+
+function validatePassword(password) {
+  if (!password || password.length < 6) {
+    return 'Password must be at least 6 characters';
+  }
+  return null;
+}
+
+// Routes
+// Register endpoint
+app.post('/api/register', async (req, res) => {
+  try {
+    const { username, email, password } = req.body;
+
+    // Validate inputs
+    const usernameError = validateUsername(username);
+    const emailError = validateEmail(email);
+    const passwordError = validatePassword(password);
+
+    if (usernameError) return res.status(400).json({ error: usernameError });
+    if (emailError) return res.status(400).json({ error: emailError });
+    if (passwordError) return res.status(400).json({ error: passwordError });
+
+    // Check if email already exists
+    const emails = await readJSONFile(EMAILS_FILE);
     if (emails[email]) {
-      return res.status(400).json({ error: 'Email already in use.' });
+      return res.status(400).json({ error: 'Email already registered' });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
-    users[username] = { email, password: hashedPassword };
+    // Check username cooldown
+    const usernameHistory = await readJSONFile(USERNAME_HISTORY_FILE);
+    if (usernameHistory[username]) {
+      const lastUsed = new Date(usernameHistory[username]);
+      const now = new Date();
+      const diffDays = Math.floor((now - lastUsed) / (1000 * 60 * 60 * 24));
+      if (diffDays < 7) {
+        return res.status(400).json({ error: 'Username is on cooldown' });
+      }
+    }
+
+    // Check if username already exists
+    const users = await readJSONFile(USERS_FILE);
+    if (users[username]) {
+      return res.status(400).json({ error: 'Username already taken' });
+    }
+
+    // Hash password
+    const saltRounds = 12;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+    // Create user
+    const newUser = {
+      email,
+      password_hash: hashedPassword,
+      createdAt: new Date().toISOString()
+    };
+
+    // Update data files
+    users[username] = newUser;
     emails[email] = username;
-
-    await writeJSON('users.json', users);
-    await writeJSON('emails.json', emails);
-
-    const profiles = await readJSON('profiles.json');
+    
+    const profiles = await readJSONFile(PROFILES_FILE);
     profiles[username] = {
       name: username,
-      avatar: 'https://i.imgur.com/uYr99AV.png',
-      banner: 'https://i.imgur.com/3M6J3ZP.png',
+      avatar: '',
+      banner: '',
       bio: '',
-      links: []
+      links: [],
+      theme: 'light',
+      customCSS: ''
     };
-    await writeJSON('profiles.json', profiles);
+    
+    const usernameHistoryUpdated = { ...usernameHistory };
+    delete usernameHistoryUpdated[username];
 
-    const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '24h' });
+    const success = await Promise.all([
+      atomicWrite(USERS_FILE, users),
+      atomicWrite(EMAILS_FILE, emails),
+      atomicWrite(PROFILES_FILE, profiles),
+      atomicWrite(USERNAME_HISTORY_FILE, usernameHistoryUpdated)
+    ]);
+
+    if (!success.every(Boolean)) {
+      return res.status(500).json({ error: 'Registration failed' });
+    }
+
+    // Generate JWT
+    const token = generateJWT({ username, iss: 'hostnet', aud: 'hostnet-users' });
+
     res.json({ token, username });
   } catch (err) {
     console.error('Registration error:', err);
-    res.status(500).json({ error: 'Server error. Please try again later.' });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// POST /api/login
+// Login endpoint
 app.post('/api/login', async (req, res) => {
-  const { email, password } = req.body;
-
-  if (!email || !password) {
-    return res.status(400).json({ error: 'Email and password are required.' });
-  }
-
   try {
-    const users = await readJSON('users.json');
-    const username = Object.keys(users).find(u => users[u].email === email);
+    const { email, password } = req.body;
 
-    if (!username) {
-      return res.status(400).json({ error: 'Invalid credentials.' });
+    // Validate inputs
+    const emailError = validateEmail(email);
+    const passwordError = validatePassword(password);
+
+    if (emailError) return res.status(400).json({ error: emailError });
+    if (passwordError) return res.status(400).json({ error: passwordError });
+
+    // Find user
+    const users = await readJSONFile(USERS_FILE);
+    const user = Object.entries(users).find(([_, userData]) => userData.email === email);
+
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    const match = await bcrypt.compare(password, users[username].password);
-    if (!match) {
-      return res.status(400).json({ error: 'Invalid credentials.' });
+    const [username, userData] = user;
+
+    // Verify password
+    const isValid = await bcrypt.compare(password, userData.password_hash);
+    if (!isValid) {
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '24h' });
+    // Generate JWT
+    const token = generateJWT({ username, iss: 'hostnet', aud: 'hostnet-users' });
+
     res.json({ token, username });
   } catch (err) {
     console.error('Login error:', err);
-    res.status(500).json({ error: 'Server error.' });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// GET /api/user/:id
+// Get user profile
 app.get('/api/user/:id', async (req, res) => {
   try {
-    const profiles = await readJSON('profiles.json');
-    const profile = profiles[req.params.id];
-
+    const { id } = req.params;
+    const profiles = await readJSONFile(PROFILES_FILE);
+    const profile = profiles[id];
+    
     if (!profile) {
-      return res.status(404).json({ error: 'User not found.' });
+      return res.status(404).json({ error: 'User not found' });
     }
-
-    res.json(profile);
-  } catch (err) {
-    console.error('Get user error:', err);
-    res.status(500).json({ error: 'Server error.' });
-  }
-});
-
-// POST /api/user/:id (Save Profile)
-app.post('/api/user/:id', authenticateToken, async (req, res) => {
-  const userId = req.params.id;
-
-  if (req.user.username !== userId) {
-    return res.status(403).json({ error: 'Forbidden: You can only edit your own profile.' });
-  }
-
-  const { name, avatar, banner, bio, links } = req.body;
-
-  if (!name || typeof name !== 'string') {
-    return res.status(400).json({ error: 'Valid name is required.' });
-  }
-
-  try {
-    const profiles = await readJSON('profiles.json');
-
-    profiles[userId] = {
-      name: name.trim().substring(0, 50),
-      avatar: avatar && typeof avatar === 'string' && avatar.startsWith('http') ? avatar : 'https://i.imgur.com/uYr99AV.png',
-      banner: banner && typeof banner === 'string' && banner.startsWith('http') ? banner : 'https://i.imgur.com/3M6J3ZP.png',
-      bio: bio ? String(bio).substring(0, 200) : '',
-      links: Array.isArray(links)
-        ? links
-            .filter(link => link.title && link.url)
-            .map(link => ({
-              title: String(link.title).substring(0, 50),
-              url: String(link.url),
-              icon: link.icon ? String(link.icon).substring(0, 10) : '🔗'
-            }))
-        : []
+    
+    // Remove sensitive data
+    const publicProfile = {
+      name: profile.name,
+      avatar: profile.avatar,
+      banner: profile.banner,
+      bio: profile.bio,
+      links: profile.links,
+      theme: profile.theme
     };
-
-    await writeJSON('profiles.json', profiles);
-    res.json({ success: true });
+    
+    res.json(publicProfile);
   } catch (err) {
-    console.error('Save profile error:', err);
-    res.status(500).json({ error: 'Failed to save profile.' });
+    console.error('Get user profile error:', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// GET /redirect/:user/:url → Track click & redirect
-app.get('/redirect/:user/:url', async (req, res) => {
-  const { user, url } = req.params;
-  const decodedUrl = decodeURIComponent(url);
-
+// Update user profile
+app.post('/api/user/:id', async (req, res) => {
   try {
-    const clicks = await readJSON('clicks.json');
-    clicks[user] = clicks[user] || {};
-    clicks[user][decodedUrl] = (clicks[user][decodedUrl] || 0) + 1;
-    await writeJSON('clicks.json', clicks);
+    const { id } = req.params;
+    const token = req.headers.authorization?.split(' ')[1];
+    
+    if (!token) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    
+    const decoded = verifyJWT(token);
+    if (!decoded || decoded.username !== id) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    
+    const { name, avatar, banner, bio, links, newUsername, theme, customCSS } = req.body;
+    
+    // Read current data
+    const profiles = await readJSONFile(PROFILES_FILE);
+    const users = await readJSONFile(USERS_FILE);
+    const emails = await readJSONFile(EMAILS_FILE);
+    const usernameHistory = await readJSONFile(USERNAME_HISTORY_FILE);
+    
+    // Validate new username if provided
+    let updatedUsername = id;
+    if (newUsername && newUsername !== id) {
+      const usernameError = validateUsername(newUsername);
+      if (usernameError) {
+        return res.status(400).json({ error: usernameError });
+      }
+      
+      // Check if username is on cooldown
+      if (usernameHistory[newUsername]) {
+        const lastUsed = new Date(usernameHistory[newUsername]);
+        const now = new Date();
+        const diffDays = Math.floor((now - lastUsed) / (1000 * 60 * 60 * 24));
+        if (diffDays < 7) {
+          return res.status(400).json({ error: 'Username is on cooldown' });
+        }
+      }
+      
+      // Check if username already exists
+      if (users[newUsername]) {
+        return res.status(400).json({ error: 'Username already taken' });
+      }
+      
+      // Update username
+      updatedUsername = newUsername;
+      
+      // Move user data
+      users[newUsername] = users[id];
+      delete users[id];
+      
+      // Update email mapping
+      emails[users[newUsername].email] = newUsername;
+      delete emails[users[id].email];
+      
+      // Update profile
+      profiles[newUsername] = profiles[id];
+      delete profiles[id];
+      
+      // Add old username to history
+      usernameHistory[id] = new Date().toISOString();
+    }
+    
+    // Update profile
+    const profile = profiles[updatedUsername];
+    if (name) profile.name = name;
+    if (avatar) profile.avatar = avatar;
+    if (banner) profile.banner = banner;
+    if (bio) profile.bio = bio;
+    if (links) profile.links = links;
+    if (theme) profile.theme = theme;
+    if (customCSS) profile.customCSS = customCSS;
+    
+    // Save changes
+    const success = await Promise.all([
+      atomicWrite(USERS_FILE, users),
+      atomicWrite(EMAILS_FILE, emails),
+      atomicWrite(PROFILES_FILE, profiles),
+      atomicWrite(USERNAME_HISTORY_FILE, usernameHistory)
+    ]);
+    
+    if (!success.every(Boolean)) {
+      return res.status(500).json({ error: 'Update failed' });
+    }
+    
+    // Generate new token if username changed
+    let newToken = token;
+    if (updatedUsername !== id) {
+      newToken = generateJWT({ username: updatedUsername, iss: 'hostnet', aud: 'hostnet-users' });
+    }
+    
+    res.json({ token: newToken, username: updatedUsername });
   } catch (err) {
-    console.error('Click tracking failed:', err);
-  } finally {
-    res.redirect(decodedUrl);
+    console.error('Update user profile error:', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// ======================
-// 🚀 Start Server
-// ======================
-async function startServer() {
-  await initializeDataDir();
-  console.log('📁 Data directory initialized');
+// Redirect endpoint
+app.get('/redirect/:user/:url', async (req, res) => {
+  try {
+    const { user, url } = req.params;
+    
+    // Decode URL
+    const decodedUrl = decodeURIComponent(url);
+    
+    // Increment click count
+    try {
+      const clicks = await readJSONFile(CLICKS_FILE);
+      if (!clicks[user]) clicks[user] = {};
+      if (!clicks[user][decodedUrl]) clicks[user][decodedUrl] = 0;
+      clicks[user][decodedUrl]++;
+      
+      await atomicWrite(CLICKS_FILE, clicks);
+    } catch (err) {
+      console.error('Click tracking failed:', err);
+    }
+    
+    // Redirect
+    res.redirect(302, decodedUrl);
+  } catch (err) {
+    console.error('Redirect error:', err);
+    // Fallback redirect to homepage
+    res.redirect(302, '/');
+  }
+});
 
-  http.listen(PORT, () => {
-    console.log(`✅ HostNet Bio API is live on port ${PORT}`);
-    console.log(`🌐 Access your service at:`);
-    console.log(`   - https://hostnetapi.onrender.com`);
-    console.log(`🔒 Endpoints:`);
-    console.log(`   POST /api/register`);
-    console.log(`   POST /api/login`);
-    console.log(`   GET  /api/user/:id`);
-    console.log(`   POST /api/user/:id (auth required)`);
-    console.log(`   GET  /redirect/:user/:url`);
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ status: 'OK', timestamp: new Date().toISOString() });
+});
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('Shutting down gracefully...');
+  process.exit(0);
+});
+
+// Start server
+async function startServer() {
+  await ensureDataDirectory();
+  await initializeDataFiles();
+  
+  app.listen(PORT, () => {
+    console.log(`HostNet API server running on port ${PORT}`);
   });
 }
 
-startServer().catch(console.error);
-
-// ======================
-// 🛑 Graceful Shutdown
-// ======================
-process.on('SIGTERM', () => {
-  console.log('\n🛑 Shutting down gracefully...');
-  http.close(() => {
-    console.log('⏹️ HTTP server closed.');
-    process.exit(0);
-  });
-});
-
-process.on('unhandledRejection', (err) => {
-  console.error('Unhandled Rejection:', err);
-  process.exit(1);
-});
-
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception:', err);
+startServer().catch(err => {
+  console.error('Failed to start server:', err);
   process.exit(1);
 });
