@@ -1,5 +1,4 @@
-// server.js - HostNet Bio API
-// Runs on Render.com | Connects to PHP frontend
+// server.js - HostNet Bio API (Fixed & Secure)
 const express = require('express');
 const fs = require('fs').promises;
 const path = require('path');
@@ -15,7 +14,7 @@ const io = new Server(http);
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = path.join(__dirname, 'data');
 
-// Ensure data directory exists
+// Initialize data directory
 async function initializeDataDir() {
   try {
     await fs.access(DATA_DIR);
@@ -23,19 +22,19 @@ async function initializeDataDir() {
     await fs.mkdir(DATA_DIR, { recursive: true });
   }
 
-  // Initialize data files if not exist
   const files = {
     'users.json': '{}',
     'emails.json': '{}',
-    'clicks.json': '{}'
+    'clicks.json': '{}',
+    'tokens.json': '{}'  // ← Added: Token storage
   };
 
-  for (const [filename, defaultContent] of Object.entries(files)) {
+  for (const [filename, content] of Object.entries(files)) {
     const filePath = path.join(DATA_DIR, filename);
     try {
       await fs.access(filePath);
     } catch {
-      await fs.writeFile(filePath, defaultContent, 'utf8');
+      await fs.writeFile(filePath, content, 'utf8');
       console.log(`✅ Created ${filename}`);
     }
   }
@@ -57,20 +56,25 @@ async function writeJSON(filename, data) {
   );
 }
 
+// Generate secure token
+function generateToken() {
+  return require('crypto').randomBytes(16).toString('hex');
+}
+
 // ======================
-// 🌐 CORS Setup
+// 🌐 CORS Setup (NO EXTRA SPACES!)
 // ======================
 const ALLOWED_ORIGINS = [
   'https://hostnet.ct.ws',
   'https://hostnet.wiki',
-  'https://yourname.000webhostapp.com', // Replace with your InfinityFree subdomain
-  'http://localhost:5173' // For local dev
+  'https://yourname.000webhostapp.com', // Replace with your actual subdomain
+  'http://localhost:5173'
 ];
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (!origin || ALLOWED_ORIGINS.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin || '*');
+    res.setHeader('Access-Control-Allow-Origin', origin);
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -85,9 +89,10 @@ app.use((req, res, next) => {
 app.use(express.json());
 
 // ======================
-// 📂 Static Assets (Optional)
+// 📂 Serve Static Files (Important!)
 // ======================
-app.use(express.static('public')); // e.g., favicon, logo
+// This allows /u.php, /index.php, etc. to be accessed via proxy or CDN
+app.use(express.static('public')); // Optional: for favicon, etc.
 
 // ======================
 // 📝 API Routes
@@ -98,31 +103,28 @@ app.get('/api/user/:id', async (req, res) => {
   try {
     const users = await readJSON('users.json');
     const user = users[req.params.id];
-
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
+    if (!user) return res.status(404).json({ error: 'User not found' });
     res.json(user);
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// POST /api/user/:id → Save user + email
+// POST /api/user/:id → Save user + email + generate token
 app.post('/api/user/:id', async (req, res) => {
   const { username, email, ...profile } = req.body;
+  const userId = req.params.id;
 
   // Validate username
-  if (!/^[a-zA-Z0-9_]{3,20}$/.test(req.params.id)) {
+  if (!/^[a-zA-Z0-9_]{3,20}$/.test(userId)) {
     return res.status(400).json({ error: 'Invalid username' });
   }
 
   try {
-    // Save user profile
+    // Save user
     const users = await readJSON('users.json');
-    users[req.params.id] = {
-      name: profile.name || username || req.params.id,
+    users[userId] = {
+      name: profile.name || username || userId,
       avatar: profile.avatar || 'https://i.imgur.com/uYr99AV.png',
       links: Array.isArray(profile.links) ? profile.links : []
     };
@@ -130,19 +132,44 @@ app.post('/api/user/:id', async (req, res) => {
 
     // Save email
     const emails = await readJSON('emails.json');
-    emails[req.params.id] = {
-      email: email,
-      joined: new Date().toISOString()
-    };
+    emails[userId] = { email, joined: new Date().toISOString() };
     await writeJSON('emails.json', emails);
 
-    // Notify real-time clients
-    io.emit('update:' + req.params.id);
+    // Generate and save edit token if not exists
+    let tokens = await readJSON('tokens.json');
+    if (!tokens[userId]) {
+      tokens[userId] = generateToken();
+      await writeJSON('tokens.json', tokens);
+    }
 
-    res.json({ success: true, message: 'Profile saved!' });
+    // Notify real-time clients
+    io.emit('update:' + userId);
+
+    // ✅ Return token so frontend can redirect securely
+    res.json({
+      success: true,
+      message: 'Profile saved!',
+      token: tokens[userId]  // ← Critical: Return token
+    });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to save' });
+  }
+});
+
+// GET /api/token/:id → Get edit token
+app.get('/api/token/:id', async (req, res) => {
+  try {
+    const tokens = await readJSON('tokens.json');
+    const token = tokens[req.params.id];
+    if (token) {
+      res.json({ token });
+    } else {
+      res.status(404).json({ error: 'Token not found' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -157,17 +184,15 @@ app.get('/redirect/:user/:url', async (req, res) => {
     clicks[user][decodedUrl] = (clicks[user][decodedUrl] || 0) + 1;
     await writeJSON('clicks.json', clicks);
 
-    // Emit real-time event
     io.emit('click:' + user, { url: decodedUrl, count: clicks[user][decodedUrl] });
-
-    // Redirect
-    res.redirect(decodedUrl);
   } catch (err) {
-    res.redirect(decodedUrl); // Redirect anyway
+    console.error('Tracking failed:', err);
+  } finally {
+    res.redirect(decodedUrl);
   }
 });
 
-// GET /api/stats/:user → Get click stats (admin use)
+// GET /api/stats/:user → Click stats
 app.get('/api/stats/:user', async (req, res) => {
   try {
     const clicks = await readJSON('clicks.json');
@@ -177,7 +202,7 @@ app.get('/api/stats/:user', async (req, res) => {
   }
 });
 
-// GET /api/users → List all usernames (optional)
+// GET /api/users → List all usernames
 app.get('/api/users', async (req, res) => {
   try {
     const users = await readJSON('users.json');
@@ -199,7 +224,6 @@ io.on('connection', (socket) => {
 
   socket.on('join', (room) => {
     socket.join(room);
-    console.log(`Socket ${socket.id} joined room: ${room}`);
   });
 });
 
@@ -216,10 +240,9 @@ async function startServer() {
     console.log(`   - https://hostnet.ct.ws`);
     console.log(`   - https://hostnetapi.onrender.com`);
     console.log(`🔒 API Endpoints:`);
-    console.log(`   - GET  /api/user/:id`);
-    console.log(`   - POST /api/user/:id`);
+    console.log(`   - POST /api/user/:id (returns token)`);
+    console.log(`   - GET  /api/token/:id`);
     console.log(`   - GET  /redirect/:user/:url`);
-    console.log(`   - GET  /api/stats/:user`);
   });
 }
 
@@ -229,7 +252,7 @@ startServer().catch(console.error);
 // 🛑 Graceful Shutdown
 // ======================
 process.on('SIGTERM', () => {
-  console.log('\n🛑 Shutting down gracefully...');
+  console.log('🛑 Shutting down gracefully...');
   http.close(() => {
     console.log('⏹️ HTTP server closed.');
     process.exit(0);
