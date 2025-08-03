@@ -25,7 +25,7 @@ async function initializeDataDir() {
 
   const files = {
     'users.json': '{}',        // username → { email, password_hash }
-    'profiles.json': '{}',     // username → { name, avatar, links }
+    'profiles.json': '{}',     // username → { name, avatar, banner, bio, links }
     'clicks.json': '{}'        // user → { url: count }
   };
 
@@ -57,7 +57,7 @@ async function writeJSON(filename, data) {
 }
 
 // ======================
-// 🌐 CORS Setup (Only allowed origins)
+// 🌐 CORS Setup (NO TRAILING SPACES!)
 // ======================
 const ALLOWED_ORIGINS = [
   'https://hostnet.ct.ws',
@@ -68,11 +68,9 @@ const ALLOWED_ORIGINS = [
 app.use((req, res, next) => {
   const origin = req.headers.origin;
 
-  // Allow only specific origins (no trailing spaces!)
   if (origin && ALLOWED_ORIGINS.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   } else if (!origin) {
-    // CLI/curl requests
     res.setHeader('Access-Control-Allow-Origin', '*');
   } else {
     return res.status(403).json({ error: 'CORS not allowed' });
@@ -151,6 +149,8 @@ app.post('/api/register', async (req, res) => {
     profiles[username] = {
       name: username.charAt(0).toUpperCase() + username.slice(1),
       avatar: 'https://i.imgur.com/uYr99AV.png',
+      banner: 'https://i.imgur.com/3M6J3ZP.png',
+      bio: '',
       links: []
     };
     await writeJSON('profiles.json', profiles);
@@ -215,12 +215,11 @@ app.get('/api/user/:id', async (req, res) => {
 app.post('/api/user/:id', authenticateToken, async (req, res) => {
   const userId = req.params.id;
 
-  // Ensure user can only edit their own profile
   if (req.user.username !== userId) {
     return res.status(403).json({ error: 'Forbidden: You can only edit your own profile.' });
   }
 
-  const { name, avatar, links } = req.body;
+  const { name, avatar, banner, bio, links } = req.body;
 
   if (!name || typeof name !== 'string') {
     return res.status(400).json({ error: 'Valid name is required.' });
@@ -232,6 +231,8 @@ app.post('/api/user/:id', authenticateToken, async (req, res) => {
     profiles[userId] = {
       name: name.trim().substring(0, 50),
       avatar: avatar && typeof avatar === 'string' && avatar.startsWith('http') ? avatar : 'https://i.imgur.com/uYr99AV.png',
+      banner: banner && typeof banner === 'string' && banner.startsWith('http') ? banner : 'https://i.imgur.com/3M6J3ZP.png',
+      bio: bio ? String(bio).substring(0, 200) : '',
       links: Array.isArray(links)
         ? links
             .filter(link => link.title && link.url)
