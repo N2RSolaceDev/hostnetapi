@@ -1,4 +1,4 @@
-// server.js - HostNet Bio API (Final & Secure)
+// server.js - HostNet Bio API
 const express = require('express');
 const fs = require('fs').promises;
 const path = require('path');
@@ -24,9 +24,9 @@ async function initializeDataDir() {
   }
 
   const files = {
-    'users.json': '{}',        // username → { email, password_hash }
-    'profiles.json': '{}',     // username → { name, avatar, banner, bio, links }
-    'clicks.json': '{}'        // user → { url: count }
+    'users.json': '{}',
+    'profiles.json': '{}',
+    'clicks.json': '{}'
   };
 
   for (const [filename, content] of Object.entries(files)) {
@@ -57,11 +57,11 @@ async function writeJSON(filename, data) {
 }
 
 // ======================
-// 🌐 CORS Setup (NO TRAILING SPACES!)
+// 🌐 CORS Setup
 // ======================
 const ALLOWED_ORIGINS = [
-  'https://hostnet.ct.ws',
   'https://hostnet.wiki',
+  'https://www.hostnet.wiki',
   'http://localhost:5173'
 ];
 
@@ -94,16 +94,12 @@ app.use(express.json());
 // ======================
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+  const token = authHeader && authHeader.split(' ')[1];
 
-  if (!token) {
-    return res.status(401).json({ error: 'Access denied. No token provided.' });
-  }
+  if (!token) return res.status(401).json({ error: 'Access denied' });
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) {
-      return res.status(403).json({ error: 'Invalid or expired token.' });
-    }
+    if (err) return res.status(403).json({ error: 'Invalid or expired token' });
     req.user = user;
     next();
   });
@@ -118,36 +114,30 @@ app.post('/api/register', async (req, res) => {
   const { username, email, password } = req.body;
 
   if (!username || !email || !password) {
-    return res.status(400).json({ error: 'All fields (username, email, password) are required.' });
+    return res.status(400).json({ error: 'All fields required' });
   }
 
   if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
-    return res.status(400).json({ error: 'Username must be 3–20 characters: letters, numbers, underscore.' });
+    return res.status(400).json({ error: 'Invalid username' });
   }
 
   if (password.length < 6) {
-    return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
-  }
-
-  if (!/^[\w.-]+@[\w.-]+\.\w+$/.test(email)) {
-    return res.status(400).json({ error: 'Please enter a valid email address.' });
+    return res.status(400).json({ error: 'Password too short' });
   }
 
   try {
     const users = await readJSON('users.json');
-
     if (users[username]) {
-      return res.status(400).json({ error: 'Username already taken.' });
+      return res.status(400).json({ error: 'Username taken' });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
-    users[username] = { email, password: hashedPassword };
+    const hashed = await bcrypt.hash(password, 10);
+    users[username] = { email, password: hashed };
     await writeJSON('users.json', users);
 
-    // Create default profile
     const profiles = await readJSON('profiles.json');
     profiles[username] = {
-      name: username.charAt(0).toUpperCase() + username.slice(1),
+      name: username,
       avatar: 'https://i.imgur.com/uYr99AV.png',
       banner: 'https://i.imgur.com/3M6J3ZP.png',
       bio: '',
@@ -155,43 +145,30 @@ app.post('/api/register', async (req, res) => {
     };
     await writeJSON('profiles.json', profiles);
 
-    // Generate JWT
     const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '24h' });
-
     res.json({ token, username });
   } catch (err) {
-    console.error('Registration error:', err);
-    res.status(500).json({ error: 'Server error. Please try again later.' });
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
 // POST /api/login
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
+  const users = await readJSON('users.json');
+  const username = Object.keys(users).find(u => users[u].email === email);
 
-  if (!email || !password) {
-    return res.status(400).json({ error: 'Email and password are required.' });
+  if (!username) {
+    return res.status(400).json({ error: 'Invalid credentials' });
   }
 
-  try {
-    const users = await readJSON('users.json');
-    const username = Object.keys(users).find(u => users[u].email === email);
-
-    if (!username) {
-      return res.status(400).json({ error: 'Invalid credentials.' });
-    }
-
-    const match = await bcrypt.compare(password, users[username].password);
-    if (!match) {
-      return res.status(400).json({ error: 'Invalid credentials.' });
-    }
-
-    const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '24h' });
-    res.json({ token, username });
-  } catch (err) {
-    console.error('Login error:', err);
-    res.status(500).json({ error: 'Server error.' });
+  const match = await bcrypt.compare(password, users[username].password);
+  if (!match) {
+    return res.status(400).json({ error: 'Invalid credentials' });
   }
+
+  const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '24h' });
+  res.json({ token, username });
 });
 
 // GET /api/user/:id
@@ -199,74 +176,45 @@ app.get('/api/user/:id', async (req, res) => {
   try {
     const profiles = await readJSON('profiles.json');
     const profile = profiles[req.params.id];
-
-    if (!profile) {
-      return res.status(404).json({ error: 'User not found.' });
-    }
-
+    if (!profile) return res.status(404).json({ error: 'Not found' });
     res.json(profile);
   } catch (err) {
-    console.error('Get user error:', err);
-    res.status(500).json({ error: 'Server error.' });
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
-// POST /api/user/:id (Save Profile)
+// POST /api/user/:id
 app.post('/api/user/:id', authenticateToken, async (req, res) => {
-  const userId = req.params.id;
-
-  if (req.user.username !== userId) {
-    return res.status(403).json({ error: 'Forbidden: You can only edit your own profile.' });
+  if (req.user.username !== req.params.id) {
+    return res.status(403).json({ error: 'Forbidden' });
   }
 
   const { name, avatar, banner, bio, links } = req.body;
+  const profiles = await readJSON('profiles.json');
 
-  if (!name || typeof name !== 'string') {
-    return res.status(400).json({ error: 'Valid name is required.' });
-  }
+  profiles[req.params.id] = {
+    name: name || req.params.id,
+    avatar: avatar || 'https://i.imgur.com/uYr99AV.png',
+    banner: banner || 'https://i.imgur.com/3M6J3ZP.png',
+    bio: bio || '',
+    links: Array.isArray(links) ? links : []
+  };
 
-  try {
-    const profiles = await readJSON('profiles.json');
-
-    profiles[userId] = {
-      name: name.trim().substring(0, 50),
-      avatar: avatar && typeof avatar === 'string' && avatar.startsWith('http') ? avatar : 'https://i.imgur.com/uYr99AV.png',
-      banner: banner && typeof banner === 'string' && banner.startsWith('http') ? banner : 'https://i.imgur.com/3M6J3ZP.png',
-      bio: bio ? String(bio).substring(0, 200) : '',
-      links: Array.isArray(links)
-        ? links
-            .filter(link => link.title && link.url)
-            .map(link => ({
-              title: String(link.title).substring(0, 50),
-              url: String(link.url),
-              icon: link.icon ? String(link.icon).substring(0, 10) : '🔗'
-            }))
-        : []
-    };
-
-    await writeJSON('profiles.json', profiles);
-    res.json({ success: true });
-  } catch (err) {
-    console.error('Save profile error:', err);
-    res.status(500).json({ error: 'Failed to save profile.' });
-  }
+  await writeJSON('profiles.json', profiles);
+  res.json({ success: true });
 });
 
-// GET /redirect/:user/:url → Track click & redirect
+// GET /redirect/:user/:url
 app.get('/redirect/:user/:url', async (req, res) => {
   const { user, url } = req.params;
   const decodedUrl = decodeURIComponent(url);
-
   try {
     const clicks = await readJSON('clicks.json');
     clicks[user] = clicks[user] || {};
     clicks[user][decodedUrl] = (clicks[user][decodedUrl] || 0) + 1;
     await writeJSON('clicks.json', clicks);
-  } catch (err) {
-    console.error('Click tracking failed:', err);
-  } finally {
-    res.redirect(decodedUrl);
-  }
+  } catch (err) {}
+  res.redirect(decodedUrl);
 });
 
 // ======================
@@ -285,7 +233,6 @@ async function startServer() {
     console.log(`   POST /api/login`);
     console.log(`   GET  /api/user/:id`);
     console.log(`   POST /api/user/:id (auth required)`);
-    console.log(`   GET  /redirect/:user/:url`);
   });
 }
 
@@ -295,19 +242,6 @@ startServer().catch(console.error);
 // 🛑 Graceful Shutdown
 // ======================
 process.on('SIGTERM', () => {
-  console.log('\n🛑 Shutting down gracefully...');
-  http.close(() => {
-    console.log('⏹️ HTTP server closed.');
-    process.exit(0);
-  });
-});
-
-process.on('unhandledRejection', (err) => {
-  console.error('Unhandled Rejection:', err);
-  process.exit(1);
-});
-
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception:', err);
-  process.exit(1);
+  console.log('🛑 Shutting down...');
+  http.close(() => process.exit(0));
 });
