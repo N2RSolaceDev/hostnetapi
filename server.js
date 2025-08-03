@@ -1,4 +1,4 @@
-// server.js - HostNet Bio API
+// server.js - HostNet Bio API (Secure & Permanent)
 const express = require('express');
 const fs = require('fs').promises;
 const path = require('path');
@@ -24,8 +24,9 @@ async function initializeDataDir() {
   }
 
   const files = {
-    'users.json': '{}',
-    'profiles.json': '{}',
+    'users.json': '{}',        // username → { email, password_hash }
+    'profiles.json': '{}',     // username → { name, avatar, links }
+    'emails.json': '{}',       // email → username (permanent link)
     'clicks.json': '{}'
   };
 
@@ -62,6 +63,7 @@ async function writeJSON(filename, data) {
 const ALLOWED_ORIGINS = [
   'https://hostnet.wiki',
   'https://www.hostnet.wiki',
+  'https://hostnet.ct.ws',
   'http://localhost:5173'
 ];
 
@@ -125,22 +127,36 @@ app.post('/api/register', async (req, res) => {
     return res.status(400).json({ error: 'Password too short' });
   }
 
+  if (!filterValidEmail(email)) {
+    return res.status(400).json({ error: 'Invalid email' });
+  }
+
   try {
     const users = await readJSON('users.json');
+    const emails = await readJSON('emails.json');
+
+    // ❌ Prevent username reuse — even after deletion
     if (users[username]) {
-      return res.status(400).json({ error: 'Username taken' });
+      return res.status(400).json({ error: 'Username is permanently taken' });
+    }
+
+    // ❌ Prevent email reuse
+    if (emails[email]) {
+      return res.status(400).json({ error: 'Email is permanently linked to an account' });
     }
 
     const hashed = await bcrypt.hash(password, 10);
     users[username] = { email, password: hashed };
-    await writeJSON('users.json', users);
+    emails[email] = username;
 
+    await writeJSON('users.json', users);
+    await writeJSON('emails.json', emails);
+
+    // Create profile
     const profiles = await readJSON('profiles.json');
     profiles[username] = {
       name: username,
       avatar: 'https://i.imgur.com/uYr99AV.png',
-      banner: 'https://i.imgur.com/3M6J3ZP.png',
-      bio: '',
       links: []
     };
     await writeJSON('profiles.json', profiles);
@@ -148,6 +164,7 @@ app.post('/api/register', async (req, res) => {
     const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '24h' });
     res.json({ token, username });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -189,19 +206,45 @@ app.post('/api/user/:id', authenticateToken, async (req, res) => {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
-  const { name, avatar, banner, bio, links } = req.body;
+  const { name, avatar, links } = req.body;
   const profiles = await readJSON('profiles.json');
 
   profiles[req.params.id] = {
     name: name || req.params.id,
     avatar: avatar || 'https://i.imgur.com/uYr99AV.png',
-    banner: banner || 'https://i.imgur.com/3M6J3ZP.png',
-    bio: bio || '',
     links: Array.isArray(links) ? links : []
   };
 
   await writeJSON('profiles.json', profiles);
   res.json({ success: true });
+});
+
+// DELETE /api/user/:id (optional: let user delete their account)
+app.delete('/api/user/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  if (req.user.username !== id) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  try {
+    const users = await readJSON('users.json');
+    const emails = await readJSON('emails.json');
+    const email = users[id]?.email;
+
+    // 🟡 Keep username & email permanently locked
+    delete users[id];
+    // Do NOT delete email mapping — prevents reuse
+    await writeJSON('users.json', users);
+    // emails[email] stays forever
+
+    const profiles = await readJSON('profiles.json');
+    delete profiles[id];
+    await writeJSON('profiles.json', profiles);
+
+    res.json({ success: true, message: 'Account deleted. Username and email are permanently retired.' });
+  } catch (err) {
+    res.status(500).json({ error: 'Delete failed' });
+  }
 });
 
 // GET /redirect/:user/:url
@@ -218,6 +261,14 @@ app.get('/redirect/:user/:url', async (req, res) => {
 });
 
 // ======================
+// 🛠️ Helper
+// ======================
+function filterValidEmail(email) {
+  const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return re.test(email);
+}
+
+// ======================
 // 🚀 Start Server
 // ======================
 async function startServer() {
@@ -232,7 +283,8 @@ async function startServer() {
     console.log(`   POST /api/register`);
     console.log(`   POST /api/login`);
     console.log(`   GET  /api/user/:id`);
-    console.log(`   POST /api/user/:id (auth required)`);
+    console.log(`   POST /api/user/:id`);
+    console.log(`   DELETE /api/user/:id (auth required)`);
   });
 }
 
@@ -242,6 +294,6 @@ startServer().catch(console.error);
 // 🛑 Graceful Shutdown
 // ======================
 process.on('SIGTERM', () => {
-  console.log('🛑 Shutting down...');
+  console.log('\n🛑 Shutting down...');
   http.close(() => process.exit(0));
 });
