@@ -1,4 +1,4 @@
-// server.js - HostNet Bio API (Full Customization)
+// server.js - HostNet Bio API
 const express = require('express');
 const fs = require('fs').promises;
 const path = require('path');
@@ -14,12 +14,11 @@ const http = require('http').createServer(app);
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = path.join(__dirname, 'data');
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production';
-const USERNAME_LOCK_DAYS = 7;
 
 // Initialize data
 async function init() {
   await fs.mkdir(DATA_DIR, { recursive: true });
-  for (const file of ['users.json', 'profiles.json', 'emails.json', 'username_history.json', 'templates.json']) {
+  for (const file of ['users.json', 'profiles.json', 'emails.json']) {
     const p = path.join(DATA_DIR, file);
     try { await fs.access(p); } 
     catch (err) { await fs.writeFile(p, '{}', 'utf8'); }
@@ -75,18 +74,9 @@ app.post('/api/register', async (req, res) => {
 
   const users = await read('users.json');
   const emails = await read('emails.json');
-  const history = await read('username_history.json');
 
   if (users[username]) {
-    return res.status(400).json({ error: 'Username is currently taken' });
-  }
-
-  if (history[username]) {
-    const releaseTime = new Date(history[username]).getTime() + (USERNAME_LOCK_DAYS * 24 * 60 * 60 * 1000);
-    if (Date.now() < releaseTime) {
-      const daysLeft = Math.ceil((releaseTime - Date.now()) / (1000 * 60 * 60 * 24));
-      return res.status(400).json({ error: `Username locked for ${daysLeft} more days` });
-    }
+    return res.status(400).json({ error: 'Username is taken' });
   }
 
   if (emails[email]) {
@@ -106,10 +96,7 @@ app.post('/api/register', async (req, res) => {
     avatar: 'https://i.imgur.com/uYr99AV.png', 
     banner: 'https://i.imgur.com/3M6J3ZP.png',
     bio: '',
-    links: [],
-    theme: 'dark',
-    css: '',
-    template: 'default'
+    links: [] 
   };
   await write('profiles.json', profiles);
 
@@ -142,65 +129,19 @@ app.get('/api/user/:id', async (req, res) => {
 app.post('/api/user/:id', authenticateToken, async (req, res) => {
   if (req.user.username !== req.params.id) return res.status(403).json({ error: 'Forbidden' });
 
-  const { name, avatar, banner, bio, links, newUsername, theme, css, template } = req.body;
-  const users = await read('users.json');
+  const { name, avatar, banner, bio, links } = req.body;
   const profiles = await read('profiles.json');
-  const history = await read('username_history.json');
 
-  // ✅ Allow username change
-  if (newUsername && newUsername !== req.params.id) {
-    if (users[newUsername]) {
-      return res.status(400).json({ error: 'New username is taken' });
-    }
-    if (history[newUsername]) {
-      const releaseTime = new Date(history[newUsername]).getTime() + (USERNAME_LOCK_DAYS * 24 * 60 * 60 * 1000);
-      if (Date.now() < releaseTime) {
-        const daysLeft = Math.ceil((releaseTime - Date.now()) / (1000 * 60 * 60 * 24));
-        return res.status(400).json({ error: `Username locked for ${daysLeft} more days` });
-      }
-    }
-
-    const userData = users[req.params.id];
-    delete users[req.params.id];
-    users[newUsername] = userData;
-
-    const emails = await read('emails.json');
-    emails[userData.email] = newUsername;
-
-    profiles[newUsername] = profiles[req.params.id];
-    delete profiles[req.params.id];
-
-    history[req.params.id] = new Date().toISOString();
-
-    await write('users.json', users);
-    await write('emails.json', emails);
-    await write('profiles.json', profiles);
-    await write('username_history.json', history);
-
-    const token = jwt.sign({ username: newUsername }, JWT_SECRET, { expiresIn: '24h' });
-    return res.json({ success: true, token, username: newUsername });
-  }
-
-  // Save profile
   profiles[req.params.id] = {
     name: name || req.params.id,
     avatar: avatar || 'https://i.imgur.com/uYr99AV.png',
     banner: banner || 'https://i.imgur.com/3M6J3ZP.png',
     bio: bio || '',
-    links: Array.isArray(links) ? links : [],
-    theme: theme || 'dark',
-    css: css || '',
-    template: template || 'default'
+    links: Array.isArray(links) ? links : []
   };
 
   await write('profiles.json', profiles);
   res.json({ success: true });
-});
-
-// GET /templates
-app.get('/templates', async (req, res) => {
-  const templates = await read('templates.json');
-  res.json(templates);
 });
 
 // GET /redirect/:user/:url
