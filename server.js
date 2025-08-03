@@ -380,4 +380,99 @@ app.post('/api/user/:id', async (req, res) => {
       delete emails[users[id].email];
       
       // Update profile
-      profiles
+      profiles[newUsername] = profiles[id];
+      delete profiles[id];
+      
+      // Add old username to history
+      usernameHistory[id] = new Date().toISOString();
+    }
+    
+    // Update profile
+    const profile = profiles[updatedUsername];
+    if (name) profile.name = name;
+    if (avatar) profile.avatar = avatar;
+    if (banner) profile.banner = banner;
+    if (bio) profile.bio = bio;
+    if (links) profile.links = links;
+    if (theme) profile.theme = theme;
+    if (customCSS) profile.customCSS = customCSS;
+    
+    // Save changes
+    const success = await Promise.all([
+      atomicWrite(USERS_FILE, users),
+      atomicWrite(EMAILS_FILE, emails),
+      atomicWrite(PROFILES_FILE, profiles),
+      atomicWrite(USERNAME_HISTORY_FILE, usernameHistory)
+    ]);
+    
+    if (!success.every(Boolean)) {
+      return res.status(500).json({ error: 'Update failed' });
+    }
+    
+    // Generate new token if username changed
+    let newToken = token;
+    if (updatedUsername !== id) {
+      newToken = generateJWT({ username: updatedUsername, iss: 'hostnet', aud: 'hostnet-users' });
+    }
+    
+    res.json({ token: newToken, username: updatedUsername });
+  } catch (err) {
+    console.error('Update user profile error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Redirect endpoint
+app.get('/redirect/:user/:url', async (req, res) => {
+  try {
+    const { user, url } = req.params;
+    
+    // Decode URL
+    const decodedUrl = decodeURIComponent(url);
+    
+    // Increment click count
+    try {
+      const clicks = await readJSONFile(CLICKS_FILE);
+      if (!clicks[user]) clicks[user] = {};
+      if (!clicks[user][decodedUrl]) clicks[user][decodedUrl] = 0;
+      clicks[user][decodedUrl]++;
+      
+      await atomicWrite(CLICKS_FILE, clicks);
+    } catch (err) {
+      console.error('Click tracking failed:', err);
+    }
+    
+    // Redirect
+    res.redirect(302, decodedUrl);
+  } catch (err) {
+    console.error('Redirect error:', err);
+    // Fallback redirect to homepage
+    res.redirect(302, '/');
+  }
+});
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ status: 'OK', timestamp: new Date().toISOString() });
+});
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('Shutting down gracefully...');
+  process.exit(0);
+});
+
+// Start server
+async function startServer() {
+  await ensureDataDirectory();
+  await initializeDataFiles();
+  
+  app.listen(PORT, () => {
+    console.log(`HostNet API server running on port ${PORT}`);
+  });
+}
+
+startServer().catch(err => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
+});
