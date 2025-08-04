@@ -620,8 +620,7 @@ app.post('/api/resend-verification', async (req, res) => {
     // Find the user
     const user = await User.findOne({ email });
     if (!user) {
-      // Return a generic success message even if the email isn't found
-      // This prevents email enumeration attacks
+      // Generic message to prevent email enumeration
       return res.json({ message: 'If your email is registered and unverified, a new verification link has been sent.' });
     }
 
@@ -630,16 +629,16 @@ app.post('/api/resend-verification', async (req, res) => {
       return res.json({ message: 'This email is already verified.' });
     }
 
-    // Generate a new verification token and expiry
+    // Generate new token and expiry
     const newVerificationToken = generateVerificationToken();
-    const newVerificationExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours from now
+    const newVerificationExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
 
-    // Update the user in the database
+    // Update user
     user.verificationToken = newVerificationToken;
     user.verificationExpiry = newVerificationExpiry;
     await user.save();
 
-    // Send new verification email
+    // Send email
     if (transporter) {
       try {
         const verificationLink = `${BASE_URL}/api/verify-email?token=${newVerificationToken}`;
