@@ -87,11 +87,11 @@ const profileSchema = new mongoose.Schema({
   links: { type: Array, default: [] },
   theme: { type: String, default: 'light' },
   customCSS: { type: String, default: '' },
-  badges: { type: Array, default: [], validate: [Array.isArray, 'Badges must be array'] },
+  badges: { type: Array, default: [] },
   // ✅ Video Embed
   videoUrl: { type: String, default: '' },
   videoPosition: {
-    top: { type: Number, default: 200 },
+    top: { type: Number, default: 50 },
     left: { type: Number, default: 50 }
   }
 });
@@ -349,7 +349,7 @@ app.post('/api/register', async (req, res) => {
       customCSS: '',
       badges: [],
       videoUrl: '',
-      videoPosition: { top: 200, left: 50 }
+      videoPosition: { top: 50, left: 50 }
     }).save();
     await new Email({ email, username }).save();
     if (transporter) {
@@ -470,7 +470,6 @@ app.get('/api/user/:id', async (req, res) => {
       links: profile.links,
       theme: profile.theme,
       badges: profile.badges,
-      // ✅ Send video data
       videoUrl: profile.videoUrl,
       videoPosition: profile.videoPosition
     });
@@ -528,9 +527,8 @@ app.post('/api/user/:id', async (req, res) => {
       profile.theme = theme ?? profile.theme;
       profile.customCSS = customCSS ?? profile.customCSS;
       profile.badges = Array.isArray(badges) ? badges : profile.badges;
-      // ✅ Save video data
-      if (typeof videoUrl !== 'undefined') profile.videoUrl = videoUrl;
-      if (videoPosition && typeof videoPosition.top !== 'undefined' && typeof videoPosition.left !== 'undefined') {
+      profile.videoUrl = videoUrl ?? profile.videoUrl;
+      if (videoPosition && typeof videoPosition.top === 'number' && typeof videoPosition.left === 'number') {
         profile.videoPosition.top = videoPosition.top;
         profile.videoPosition.left = videoPosition.left;
       }
