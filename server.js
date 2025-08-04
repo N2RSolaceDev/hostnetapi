@@ -7,7 +7,6 @@ const path = require('path');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const { v4: uuidv4 } = require('uuid');
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -34,6 +33,7 @@ const EMAILS_FILE = path.join(DATA_DIR, 'emails.json');
 const USERNAME_HISTORY_FILE = path.join(DATA_DIR, 'username_history.json');
 const CLICKS_FILE = path.join(DATA_DIR, 'clicks.json');
 const RATE_LIMITS_FILE = path.join(DATA_DIR, 'rate_limits.json');
+const VIEWS_FILE = path.join(DATA_DIR, 'views.json'); // New file for view tracking
 
 // Ensure data directory exists
 async function ensureDataDirectory() {
@@ -87,6 +87,13 @@ async function initializeDataFiles() {
       await fs.access(RATE_LIMITS_FILE);
     } catch {
       await fs.writeFile(RATE_LIMITS_FILE, '{}');
+    }
+
+    // Views file
+    try {
+      await fs.access(VIEWS_FILE);
+    } catch {
+      await fs.writeFile(VIEWS_FILE, '{}');
     }
   } catch (err) {
     console.error('Error initializing data files:', err);
@@ -173,22 +180,18 @@ function validatePassword(password) {
 app.post('/api/register', async (req, res) => {
   try {
     const { username, email, password } = req.body;
-
     // Validate inputs
     const usernameError = validateUsername(username);
     const emailError = validateEmail(email);
     const passwordError = validatePassword(password);
-
     if (usernameError) return res.status(400).json({ error: usernameError });
     if (emailError) return res.status(400).json({ error: emailError });
     if (passwordError) return res.status(400).json({ error: passwordError });
-
     // Check if email already exists
     const emails = await readJSONFile(EMAILS_FILE);
     if (emails[email]) {
       return res.status(400).json({ error: 'Email already registered' });
     }
-
     // Check username cooldown
     const usernameHistory = await readJSONFile(USERNAME_HISTORY_FILE);
     if (usernameHistory[username]) {
@@ -199,28 +202,23 @@ app.post('/api/register', async (req, res) => {
         return res.status(400).json({ error: 'Username is on cooldown' });
       }
     }
-
     // Check if username already exists
     const users = await readJSONFile(USERS_FILE);
     if (users[username]) {
       return res.status(400).json({ error: 'Username already taken' });
     }
-
     // Hash password
     const saltRounds = 12;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
-
     // Create user
     const newUser = {
       email,
       password_hash: hashedPassword,
       createdAt: new Date().toISOString()
     };
-
     // Update data files
     users[username] = newUser;
     emails[email] = username;
-    
     const profiles = await readJSONFile(PROFILES_FILE);
     profiles[username] = {
       name: username,
@@ -231,24 +229,19 @@ app.post('/api/register', async (req, res) => {
       theme: 'light',
       customCSS: ''
     };
-    
     const usernameHistoryUpdated = { ...usernameHistory };
     delete usernameHistoryUpdated[username];
-
     const success = await Promise.all([
       atomicWrite(USERS_FILE, users),
       atomicWrite(EMAILS_FILE, emails),
       atomicWrite(PROFILES_FILE, profiles),
       atomicWrite(USERNAME_HISTORY_FILE, usernameHistoryUpdated)
     ]);
-
     if (!success.every(Boolean)) {
       return res.status(500).json({ error: 'Registration failed' });
     }
-
     // Generate JWT
     const token = generateJWT({ username, iss: 'hostnet', aud: 'hostnet-users' });
-
     res.json({ token, username });
   } catch (err) {
     console.error('Registration error:', err);
@@ -260,33 +253,25 @@ app.post('/api/register', async (req, res) => {
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-
     // Validate inputs
     const emailError = validateEmail(email);
     const passwordError = validatePassword(password);
-
     if (emailError) return res.status(400).json({ error: emailError });
     if (passwordError) return res.status(400).json({ error: passwordError });
-
     // Find user
     const users = await readJSONFile(USERS_FILE);
     const user = Object.entries(users).find(([_, userData]) => userData.email === email);
-
     if (!user) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
-
     const [username, userData] = user;
-
     // Verify password
     const isValid = await bcrypt.compare(password, userData.password_hash);
     if (!isValid) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
-
     // Generate JWT
     const token = generateJWT({ username, iss: 'hostnet', aud: 'hostnet-users' });
-
     res.json({ token, username });
   } catch (err) {
     console.error('Login error:', err);
@@ -294,7 +279,7 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// Get user profile
+// Get user profile with view counting
 app.get('/api/user/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -303,6 +288,31 @@ app.get('/api/user/:id', async (req, res) => {
     
     if (!profile) {
       return res.status(404).json({ error: 'User not found' });
+    }
+    
+    // Increment view count (but only once per session/IP)
+    try {
+      const views = await readJSONFile(VIEWS_FILE);
+      if (!views[id]) views[id] = { total: 0, daily: {}, ipTracking: {} };
+      
+      // Simple IP tracking (in a real app, you'd want better tracking)
+      const ip = req.ip || 'unknown';
+      const today = new Date().toISOString().split('T')[0];
+      
+      if (!views[id].daily[today]) {
+        views[id].daily[today] = 0;
+      }
+      
+      // Only increment if not tracked for this IP today
+      if (!views[id].ipTracking[ip]) {
+        views[id].total += 1;
+        views[id].daily[today] += 1;
+        views[id].ipTracking[ip] = today;
+      }
+      
+      await atomicWrite(VIEWS_FILE, views);
+    } catch (err) {
+      console.error('View tracking failed:', err);
     }
     
     // Remove sensitive data
@@ -327,24 +337,19 @@ app.post('/api/user/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const token = req.headers.authorization?.split(' ')[1];
-    
     if (!token) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
-    
     const decoded = verifyJWT(token);
     if (!decoded || decoded.username !== id) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
-    
     const { name, avatar, banner, bio, links, newUsername, theme, customCSS } = req.body;
-    
     // Read current data
     const profiles = await readJSONFile(PROFILES_FILE);
     const users = await readJSONFile(USERS_FILE);
     const emails = await readJSONFile(EMAILS_FILE);
     const usernameHistory = await readJSONFile(USERNAME_HISTORY_FILE);
-    
     // Validate new username if provided
     let updatedUsername = id;
     if (newUsername && newUsername !== id) {
@@ -352,7 +357,6 @@ app.post('/api/user/:id', async (req, res) => {
       if (usernameError) {
         return res.status(400).json({ error: usernameError });
       }
-      
       // Check if username is on cooldown
       if (usernameHistory[newUsername]) {
         const lastUsed = new Date(usernameHistory[newUsername]);
@@ -362,31 +366,24 @@ app.post('/api/user/:id', async (req, res) => {
           return res.status(400).json({ error: 'Username is on cooldown' });
         }
       }
-      
       // Check if username already exists
       if (users[newUsername]) {
         return res.status(400).json({ error: 'Username already taken' });
       }
-      
       // Update username
       updatedUsername = newUsername;
-      
       // Move user data
       users[newUsername] = users[id];
       delete users[id];
-      
       // Update email mapping
       emails[users[newUsername].email] = newUsername;
       delete emails[users[id].email];
-      
       // Update profile
       profiles[newUsername] = profiles[id];
       delete profiles[id];
-      
       // Add old username to history
       usernameHistory[id] = new Date().toISOString();
     }
-    
     // Update profile
     const profile = profiles[updatedUsername];
     if (name) profile.name = name;
@@ -396,7 +393,6 @@ app.post('/api/user/:id', async (req, res) => {
     if (links) profile.links = links;
     if (theme) profile.theme = theme;
     if (customCSS) profile.customCSS = customCSS;
-    
     // Save changes
     const success = await Promise.all([
       atomicWrite(USERS_FILE, users),
@@ -404,17 +400,14 @@ app.post('/api/user/:id', async (req, res) => {
       atomicWrite(PROFILES_FILE, profiles),
       atomicWrite(USERNAME_HISTORY_FILE, usernameHistory)
     ]);
-    
     if (!success.every(Boolean)) {
       return res.status(500).json({ error: 'Update failed' });
     }
-    
     // Generate new token if username changed
     let newToken = token;
     if (updatedUsername !== id) {
       newToken = generateJWT({ username: updatedUsername, iss: 'hostnet', aud: 'hostnet-users' });
     }
-    
     res.json({ token: newToken, username: updatedUsername });
   } catch (err) {
     console.error('Update user profile error:', err);
@@ -426,22 +419,18 @@ app.post('/api/user/:id', async (req, res) => {
 app.get('/redirect/:user/:url', async (req, res) => {
   try {
     const { user, url } = req.params;
-    
     // Decode URL
     const decodedUrl = decodeURIComponent(url);
-    
     // Increment click count
     try {
       const clicks = await readJSONFile(CLICKS_FILE);
       if (!clicks[user]) clicks[user] = {};
       if (!clicks[user][decodedUrl]) clicks[user][decodedUrl] = 0;
       clicks[user][decodedUrl]++;
-      
       await atomicWrite(CLICKS_FILE, clicks);
     } catch (err) {
       console.error('Click tracking failed:', err);
     }
-    
     // Redirect
     res.redirect(302, decodedUrl);
   } catch (err) {
@@ -466,7 +455,6 @@ process.on('SIGINT', async () => {
 async function startServer() {
   await ensureDataDirectory();
   await initializeDataFiles();
-  
   app.listen(PORT, () => {
     console.log(`HostNet API server running on port ${PORT}`);
   });
