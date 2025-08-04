@@ -465,7 +465,6 @@ app.get('/api/user/:id', async (req, res) => {
     const profile = await Profile.findOne({ username: id });
     if (!profile) return res.status(404).json({ error: 'User not found' });
 
-    // View tracking
     try {
       let viewRecord = await View.findOne({ username: id });
       if (!viewRecord) {
@@ -654,9 +653,16 @@ app.get('/api/dashboard/:username', async (req, res) => {
     const totalViews = viewRecord?.total || 0;
     const dailyViews = viewRecord?.daily || {};
     const today = new Date().toISOString().split('T')[0];
-    const viewsThisWeek = Object.values(dailyViews)
-      .slice(-7)
-      .reduce((a, b) => a + b, 0);
+    
+    // Calculate views this week (last 7 days)
+    const weekAgo = new Date();
+    weekAgo.setDate(weekAgo.getDate() - 7);
+    const weeklyViews = Object.entries(dailyViews)
+      .filter(([date]) => new Date(date) >= weekAgo)
+      .reduce((sum, [, count]) => sum + count, 0);
+
+    // Unique views
+    const uniqueViews = Object.keys(viewRecord?.ipTracking || {}).length;
 
     // Fetch clicks
     const clickRecords = await Click.find({ username });
@@ -681,16 +687,10 @@ app.get('/api/dashboard/:username', async (req, res) => {
       .sort((a, b) => new Date(a.date) - new Date(b.date));
 
     res.json({
-      profile: {
-        username: profile.username,
-        email: 'user@hidden.com',
-        uid: '#141768',
-        coins: 0
-      },
       stats: {
         totalViews,
-        uniqueViews: Object.keys(viewRecord?.ipTracking || {}).length,
-        viewsThisWeek,
+        uniqueViews,
+        viewsThisWeek: weeklyViews,
         clicksThisWeek,
         totalClicks
       },
