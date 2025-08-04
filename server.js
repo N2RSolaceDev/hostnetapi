@@ -15,6 +15,9 @@ const PORT = process.env.PORT || 3000;
 // Base URL for email links
 const BASE_URL = process.env.BASE_URL || 'https://hostnetapi.onrender.com';
 
+// Serve static files (e.g., verified.html) from the current directory
+app.use(express.static(path.join(__dirname)));
+
 // Middleware
 app.use(express.json());
 app.use(cors({
@@ -454,24 +457,53 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-// Verify Email
+// Verify Email — Now redirects to verified.html
 app.get('/api/verify-email', async (req, res) => {
   try {
     const { token } = req.query;
-    if (!token) return res.status(400).json({ error: 'Verification token is required' });
-    const user = await User.findOne({ verificationToken: token });
-    if (!user) return res.status(400).json({ error: 'Invalid or expired token' });
-    if (user.verificationExpiry < new Date()) {
-      return res.status(400).json({ error: 'Verification token has expired' });
+    if (!token) {
+      return res.status(400).send(`
+        <h1>Verification Failed</h1>
+        <p>No verification token provided.</p>
+        <a href="/">Go Home</a>
+      `);
     }
+
+    const user = await User.findOne({ verificationToken: token });
+    if (!user) {
+      return res.status(400).send(`
+        <h1>Invalid Link</h1>
+        <p>The verification link is invalid or has expired.</p>
+        <a href="/resend.html">Request a new link</a>
+      `);
+    }
+
+    if (user.verificationExpiry < new Date()) {
+      return res.status(400).send(`
+        <h1>Link Expired</h1>
+        <p>Your verification link has expired.</p>
+        <a href="/resend.html">Click here to resend</a>
+      `);
+    }
+
+    // Mark user as verified
     user.verified = true;
     user.verificationToken = undefined;
     user.verificationExpiry = undefined;
     await user.save();
-    res.json({ message: 'Email verified successfully', verified: true });
+
+    console.log(`Email verified for: ${user.email}`);
+
+    // ✅ Redirect to success page
+    res.redirect(302, '/verified.html');
+
   } catch (err) {
     console.error('Email verification error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).send(`
+      <h1>Server Error</h1>
+      <p>Something went wrong. Please try again later.</p>
+      <a href="/">Go Home</a>
+    `);
   }
 });
 
@@ -612,11 +644,9 @@ app.get('/api/redirect/:user/:url', async (req, res) => {
 app.post('/api/resend-verification', async (req, res) => {
   try {
     const { email } = req.body;
-
     // Validate email
     const emailError = validateEmail(email);
     if (emailError) return res.status(400).json({ error: emailError });
-
     // Find the user
     const user = await User.findOne({ email });
     if (!user) {
@@ -624,21 +654,17 @@ app.post('/api/resend-verification', async (req, res) => {
       // This prevents email enumeration attacks
       return res.json({ message: 'If your email is registered and unverified, a new verification link has been sent.' });
     }
-
     // Check if already verified
     if (user.verified) {
       return res.json({ message: 'This email is already verified.' });
     }
-
     // Generate a new verification token and expiry
     const newVerificationToken = generateVerificationToken();
     const newVerificationExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours from now
-
     // Update the user in the database
     user.verificationToken = newVerificationToken;
     user.verificationExpiry = newVerificationExpiry;
     await user.save();
-
     // Send new verification email
     if (transporter) {
       try {
@@ -658,9 +684,7 @@ app.post('/api/resend-verification', async (req, res) => {
         return res.status(500).json({ error: 'Failed to send email. Please try again later.' });
       }
     }
-
     res.json({ message: 'A new verification link has been sent to your email.' });
-
   } catch (err) {
     console.error('Resend verification error:', err);
     res.status(500).json({ error: 'Internal server error' });
