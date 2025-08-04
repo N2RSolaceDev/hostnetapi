@@ -465,6 +465,7 @@ app.get('/api/user/:id', async (req, res) => {
     const profile = await Profile.findOne({ username: id });
     if (!profile) return res.status(404).json({ error: 'User not found' });
 
+    // View tracking
     try {
       let viewRecord = await View.findOne({ username: id });
       if (!viewRecord) {
@@ -635,6 +636,69 @@ app.post('/api/resend-verification', async (req, res) => {
     res.json({ message: 'A new verification link has been sent to your email.' });
   } catch (err) {
     console.error('Resend verification error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ✅ NEW: Get Dashboard Stats (views, clicks, etc.)
+app.get('/api/dashboard/:username', async (req, res) => {
+  try {
+    const { username } = req.params;
+
+    // Fetch profile
+    const profile = await Profile.findOne({ username });
+    if (!profile) return res.status(404).json({ error: 'User not found' });
+
+    // Fetch view data
+    const viewRecord = await View.findOne({ username });
+    const totalViews = viewRecord?.total || 0;
+    const dailyViews = viewRecord?.daily || {};
+    const today = new Date().toISOString().split('T')[0];
+    const viewsThisWeek = Object.values(dailyViews)
+      .slice(-7)
+      .reduce((a, b) => a + b, 0);
+
+    // Fetch clicks
+    const clickRecords = await Click.find({ username });
+    const totalClicks = clickRecords.reduce((sum, c) => sum + c.count, 0);
+    const clicksThisWeek = clickRecords
+      .filter(c => {
+        const last7Days = new Date();
+        last7Days.setDate(last7Days.getDate() - 7);
+        return new Date(c.updatedAt) > last7Days;
+      })
+      .reduce((sum, c) => sum + c.count, 0);
+
+    // Top 5 links
+    const topLinks = clickRecords
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5)
+      .map(c => ({ title: c.url.split('/').filter(Boolean).pop() || 'Unnamed', url: c.url, clicks: c.count }));
+
+    // Views timeline for chart
+    const timeline = Object.entries(dailyViews)
+      .map(([date, count]) => ({ date, count }))
+      .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    res.json({
+      profile: {
+        username: profile.username,
+        email: 'user@hidden.com',
+        uid: '#141768',
+        coins: 0
+      },
+      stats: {
+        totalViews,
+        uniqueViews: Object.keys(viewRecord?.ipTracking || {}).length,
+        viewsThisWeek,
+        clicksThisWeek,
+        totalClicks
+      },
+      topLinks,
+      timeline
+    });
+  } catch (err) {
+    console.error('Dashboard fetch error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
