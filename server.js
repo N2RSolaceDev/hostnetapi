@@ -8,7 +8,7 @@ const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const { v4: uuidv4 } = require('uuid');
 const mongoose = require('mongoose');
-const nodemailer = require('nodemailer'); // This should be correct
+const nodemailer = require('nodemailer'); // Make sure this is properly imported
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -39,28 +39,32 @@ mongoose.connect(MONGO_URI, {
   process.exit(1);
 });
 
-// Email transporter setup
-let transporter;
+// Email transporter setup with proper error handling
+let transporter = null;
 try {
-  transporter = nodemailer.createTransporter({
-    service: 'gmail',
-    auth: {
-      user: process.env.APP_E,
-      pass: process.env.APP_P
-    }
-  });
-  
-  // Verify email configuration
-  transporter.verify((error, success) => {
-    if (error) {
-      console.error('Email configuration error:', error);
-    } else {
-      console.log('Email server is ready to send messages');
-    }
-  });
+  if (process.env.APP_E && process.env.APP_P) {
+    transporter = nodemailer.createTransporter({
+      service: 'gmail',
+      auth: {
+        user: process.env.APP_E,
+        pass: process.env.APP_P
+      }
+    });
+    
+    // Verify email configuration
+    transporter.verify((error, success) => {
+      if (error) {
+        console.error('Email configuration error:', error);
+      } else {
+        console.log('Email server is ready to send messages');
+      }
+    });
+  } else {
+    console.warn('Email configuration missing - APP_E and APP_P environment variables required');
+  }
 } catch (error) {
-  console.error('Failed to create email transporter:', error);
-  transporter = null;
+  console.error('Failed to create email transporter:', error.message);
+  console.error('Make sure nodemailer is installed and APP_E/APP_P are set');
 }
 
 // User Schema
