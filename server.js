@@ -8,7 +8,7 @@ const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const { v4: uuidv4 } = require('uuid');
 const mongoose = require('mongoose');
-const nodemailer = require('nodemailer'); // Make sure this is properly imported
+const nodemailer = require('nodemailer');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -39,7 +39,7 @@ mongoose.connect(MONGO_URI, {
   process.exit(1);
 });
 
-// Email transporter setup with proper error handling
+// Email transporter setup
 let transporter = null;
 try {
   if (process.env.APP_E && process.env.APP_P) {
@@ -64,68 +64,112 @@ try {
   }
 } catch (error) {
   console.error('Failed to create email transporter:', error.message);
-  console.error('Make sure nodemailer is installed and APP_E/APP_P are set');
 }
 
-// User Schema
-const userSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true },
-  email: { type: String, required: true, unique: true },
-  password_hash: { type: String, required: true },
-  verified: { type: Boolean, default: false },
-  verificationToken: { type: String },
-  verificationExpiry: { type: Date },
-  createdAt: { type: Date, default: Date.now }
-});
+// Data directory
+const DATA_DIR = './data';
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const PROFILES_FILE = path.join(DATA_DIR, 'profiles.json');
+const EMAILS_FILE = path.join(DATA_DIR, 'emails.json');
+const USERNAME_HISTORY_FILE = path.join(DATA_DIR, 'username_history.json');
+const CLICKS_FILE = path.join(DATA_DIR, 'clicks.json');
+const RATE_LIMITS_FILE = path.join(DATA_DIR, 'rate_limits.json');
+const VIEWS_FILE = path.join(DATA_DIR, 'views.json'); // New file for view tracking
 
-// Profile Schema
-const profileSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true },
-  name: { type: String, default: '' },
-  avatar: { type: String, default: '' },
-  banner: { type: String, default: '' },
-  bio: { type: String, default: '' },
-  links: { type: Array, default: [] },
-  theme: { type: String, default: 'light' },
-  customCSS: { type: String, default: '' }
-});
+// Ensure data directory exists
+async function ensureDataDirectory() {
+  try {
+    await fs.access(DATA_DIR);
+  } catch {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+  }
+}
 
-// Email Mapping Schema
-const emailSchema = new mongoose.Schema({
-  email: { type: String, required: true, unique: true },
-  username: { type: String, required: true }
-});
-
-// Username History Schema
-const usernameHistorySchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true },
-  lastUsed: { type: Date, default: Date.now }
-});
-
-// Clicks Schema
-const clickSchema = new mongoose.Schema({
-  username: { type: String, required: true },
-  url: { type: String, required: true },
-  count: { type: Number, default: 0 }
-});
-
-// View Schema
-const viewSchema = new mongoose.Schema({
-  username: { type: String, required: true },
-  total: { type: Number, default: 0 },
-  daily: { type: Map, of: Number, default: {} },
-  ipTracking: { type: Map, of: String, default: {} }
-});
-
-// Model definitions
-const User = mongoose.model('User', userSchema);
-const Profile = mongoose.model('Profile', profileSchema);
-const Email = mongoose.model('Email', emailSchema);
-const UsernameHistory = mongoose.model('UsernameHistory', usernameHistorySchema);
-const Click = mongoose.model('Click', clickSchema);
-const View = mongoose.model('View', viewSchema);
+// Initialize data files with defaults
+async function initializeDataFiles() {
+  try {
+    // Users file
+    try {
+      await fs.access(USERS_FILE);
+    } catch {
+      await fs.writeFile(USERS_FILE, '{}');
+    }
+    // Profiles file
+    try {
+      await fs.access(PROFILES_FILE);
+    } catch {
+      await fs.writeFile(PROFILES_FILE, '{}');
+    }
+    // Emails file
+    try {
+      await fs.access(EMAILS_FILE);
+    } catch {
+      await fs.writeFile(EMAILS_FILE, '{}');
+    }
+    // Username history file
+    try {
+      await fs.access(USERNAME_HISTORY_FILE);
+    } catch {
+      await fs.writeFile(USERNAME_HISTORY_FILE, '{}');
+    }
+    // Clicks file
+    try {
+      await fs.access(CLICKS_FILE);
+    } catch {
+      await fs.writeFile(CLICKS_FILE, '{}');
+    }
+    // Rate limits file
+    try {
+      await fs.access(RATE_LIMITS_FILE);
+    } catch {
+      await fs.writeFile(RATE_LIMITS_FILE, '{}');
+    }
+    // Views file
+    try {
+      await fs.access(VIEWS_FILE);
+    } catch {
+      await fs.writeFile(VIEWS_FILE, '{}');
+    }
+  } catch (err) {
+    console.error('Error initializing data files:', err);
+  }
+}
 
 // Helper functions
+async function readJSONFile(filePath) {
+  try {
+    const data = await fs.readFile(filePath, 'utf8');
+    return JSON.parse(data);
+  } catch (err) {
+    return {};
+  }
+}
+
+async function writeJSONFile(filePath, data) {
+  try {
+    await fs.writeFile(filePath, JSON.stringify(data, null, 2));
+    return true;
+  } catch (err) {
+    console.error(`Error writing to ${filePath}:`, err);
+    return false;
+  }
+}
+
+async function atomicWrite(filePath, data) {
+  const tempPath = `${filePath}.tmp`;
+  try {
+    await fs.writeFile(tempPath, JSON.stringify(data, null, 2));
+    await fs.rename(tempPath, filePath);
+    return true;
+  } catch (err) {
+    console.error(`Atomic write failed for ${filePath}:`, err);
+    try {
+      await fs.unlink(tempPath);
+    } catch {}
+    return false;
+  }
+}
+
 function generateJWT(payload) {
   const secret = process.env.JWT_SECRET || 'default_secret_key';
   return jwt.sign(payload, secret, { expiresIn: '24h' });
@@ -318,8 +362,63 @@ async function deleteAccount(email) {
   }
 }
 
-// Schedule cleanup every hour
-setInterval(cleanupUnverifiedAccounts, 60 * 60 * 1000);
+// User Schema
+const userSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true },
+  email: { type: String, required: true, unique: true },
+  password_hash: { type: String, required: true },
+  verified: { type: Boolean, default: false },
+  verificationToken: { type: String },
+  verificationExpiry: { type: Date },
+  createdAt: { type: Date, default: Date.now }
+});
+
+// Profile Schema
+const profileSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true },
+  name: { type: String, default: '' },
+  avatar: { type: String, default: '' },
+  banner: { type: String, default: '' },
+  bio: { type: String, default: '' },
+  links: { type: Array, default: [] },
+  theme: { type: String, default: 'light' },
+  customCSS: { type: String, default: '' }
+});
+
+// Email Mapping Schema
+const emailSchema = new mongoose.Schema({
+  email: { type: String, required: true, unique: true },
+  username: { type: String, required: true }
+});
+
+// Username History Schema
+const usernameHistorySchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true },
+  lastUsed: { type: Date, default: Date.now }
+});
+
+// Clicks Schema
+const clickSchema = new mongoose.Schema({
+  username: { type: String, required: true },
+  url: { type: String, required: true },
+  count: { type: Number, default: 0 }
+});
+
+// View Schema
+const viewSchema = new mongoose.Schema({
+  username: { type: String, required: true },
+  total: { type: Number, default: 0 },
+  daily: { type: Map, of: Number, default: {} },
+  ipTracking: { type: Map, of: String, default: {} }
+});
+
+// Model definitions
+const User = mongoose.model('User', userSchema);
+const Profile = mongoose.model('Profile', profileSchema);
+const Email = mongoose.model('Email', emailSchema);
+const UsernameHistory = mongoose.model('UsernameHistory', usernameHistorySchema);
+const Click = mongoose.model('Click', clickSchema);
+const View = mongoose.model('View', viewSchema);
 
 // Routes
 
@@ -740,9 +839,18 @@ process.on('SIGINT', async () => {
 });
 
 // Start server
-app.listen(PORT, () => {
-  console.log(`HostNet API server running on port ${PORT}`);
-  
-  // Initial cleanup run
-  cleanupUnverifiedAccounts();
+async function startServer() {
+  await ensureDataDirectory();
+  await initializeDataFiles();
+  app.listen(PORT, () => {
+    console.log(`HostNet API server running on port ${PORT}`);
+    
+    // Initial cleanup run
+    cleanupUnverifiedAccounts();
+  });
+}
+
+startServer().catch(err => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
 });
