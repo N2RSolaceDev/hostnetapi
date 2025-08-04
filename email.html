@@ -1,540 +1,147 @@
-// server.js
-const express = require('express');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const fs = require('fs').promises;
-const path = require('path');
-const cors = require('cors');
-const rateLimit = require('express-rate-limit');
-const { v4: uuidv4 } = require('uuid');
-const mongoose = require('mongoose');
-const nodemailer = require('nodemailer');
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-// Middleware
-app.use(express.json());
-app.use(cors({
-  origin: ['https://hostnet.wiki', 'https://www.hostnet.wiki'],
-  credentials: true
-}));
-
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
-  message: 'Too many requests from this IP'
-});
-app.use(limiter);
-
-// Connect to MongoDB using environment variable
-const MONGO_URI = process.env.MONGO_URI;
-mongoose.connect(MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => console.log('Connected to MongoDB'))
-.catch((err) => {
-  console.error('MongoDB connection error:', err);
-  process.exit(1);
-});
-
-// Simplified email transporter setup - bypass problematic nodemailer
-let transporter = null;
-
-// Test nodemailer import
-try {
-  console.log('Testing nodemailer import...');
-  console.log('nodemailer type:', typeof nodemailer);
-  console.log('createTransporter type:', typeof nodemailer.createTransporter);
-  
-  if (typeof nodemailer.createTransporter === 'function' && process.env.APP_E && process.env.APP_P) {
-    transporter = nodemailer.createTransporter({
-      service: 'gmail',
-      auth: {
-        user: process.env.APP_E,
-        pass: process.env.APP_P
-      }
-    });
-    
-    transporter.verify((error, success) => {
-      if (error) {
-        console.error('Email configuration error:', error);
-        transporter = null; // Disable email functionality
-      } else {
-        console.log('Email server is ready to send messages');
-      }
-    });
-  } else {
-    console.warn('Email functionality disabled - missing nodemailer or environment variables');
-  }
-} catch (error) {
-  console.error('Failed to initialize email transporter:', error.message);
-  transporter = null;
-}
-
-// User Schema
-const userSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true },
-  email: { type: String, required: true, unique: true },
-  password_hash: { type: String, required: true },
-  verified: { type: Boolean, default: false },
-  verificationToken: { type: String },
-  verificationExpiry: { type: Date },
-  createdAt: { type: Date, default: Date.now }
-});
-
-// Profile Schema
-const profileSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true },
-  name: { type: String, default: '' },
-  avatar: { type: String, default: '' },
-  banner: { type: String, default: '' },
-  bio: { type: String, default: '' },
-  links: { type: Array, default: [] },
-  theme: { type: String, default: 'light' },
-  customCSS: { type: String, default: '' }
-});
-
-// Email Mapping Schema
-const emailSchema = new mongoose.Schema({
-  email: { type: String, required: true, unique: true },
-  username: { type: String, required: true }
-});
-
-// Username History Schema
-const usernameHistorySchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true },
-  lastUsed: { type: Date, default: Date.now }
-});
-
-// Clicks Schema
-const clickSchema = new mongoose.Schema({
-  username: { type: String, required: true },
-  url: { type: String, required: true },
-  count: { type: Number, default: 0 }
-});
-
-// View Schema
-const viewSchema = new mongoose.Schema({
-  username: { type: String, required: true },
-  total: { type: Number, default: 0 },
-  daily: { type: Map, of: Number, default: {} },
-  ipTracking: { type: Map, of: String, default: {} }
-});
-
-// Model definitions
-const User = mongoose.model('User', userSchema);
-const Profile = mongoose.model('Profile', profileSchema);
-const Email = mongoose.model('Email', emailSchema);
-const UsernameHistory = mongoose.model('UsernameHistory', usernameHistorySchema);
-const Click = mongoose.model('Click', clickSchema);
-const View = mongoose.model('View', viewSchema);
-
-// Helper functions
-function generateJWT(payload) {
-  const secret = process.env.JWT_SECRET || 'default_secret_key';
-  return jwt.sign(payload, secret, { expiresIn: '24h' });
-}
-
-function verifyJWT(token) {
-  const secret = process.env.JWT_SECRET || 'default_secret_key';
-  try {
-    return jwt.verify(token, secret);
-  } catch (err) {
-    return null;
-  }
-}
-
-// Generate verification token
-function generateVerificationToken() {
-  return uuidv4();
-}
-
-// Validation helpers
-function validateUsername(username) {
-  if (!username || username.length < 3 || username.length > 20) {
-    return 'Username must be between 3 and 20 characters';
-  }
-  if (!/^[a-zA-Z0-9_]+$/.test(username)) {
-    return 'Username can only contain letters, numbers, and underscores';
-  }
-  return null;
-}
-
-function validateEmail(email) {
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!email || !emailRegex.test(email)) {
-    return 'Invalid email format';
-  }
-  return null;
-}
-
-function validatePassword(password) {
-  if (!password || password.length < 6) {
-    return 'Password must be at least 6 characters';
-  }
-  return null;
-}
-
-// Routes
-
-// Register endpoint
-app.post('/api/register', async (req, res) => {
-  try {
-    const { username, email, password } = req.body;
-    // Validate inputs
-    const usernameError = validateUsername(username);
-    const emailError = validateEmail(email);
-    const passwordError = validatePassword(password);
-    if (usernameError) return res.status(400).json({ error: usernameError });
-    if (emailError) return res.status(400).json({ error: emailError });
-    if (passwordError) return res.status(400).json({ error: passwordError });
-    
-    // Check if email already exists
-    const existingEmail = await Email.findOne({ email });
-    if (existingEmail) {
-      return res.status(400).json({ error: 'Email already registered' });
-    }
-    
-    // Check username cooldown
-    const usernameHistory = await UsernameHistory.findOne({ username });
-    if (usernameHistory) {
-      const lastUsed = new Date(usernameHistory.lastUsed);
-      const now = new Date();
-      const diffDays = Math.floor((now - lastUsed) / (1000 * 60 * 60 * 24));
-      if (diffDays < 7) {
-        return res.status(400).json({ error: 'Username is on cooldown' });
-      }
-    }
-    
-    // Check if username already exists
-    const existingUser = await User.findOne({ username });
-    if (existingUser) {
-      return res.status(400).json({ error: 'Username already taken' });
-    }
-    
-    // Hash password
-    const saltRounds = 12;
-    const hashedPassword = await bcrypt.hash(password, saltRounds);
-    
-    // Generate verification token and expiry
-    const verificationToken = generateVerificationToken();
-    const verificationExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
-    
-    // Create user
-    const newUser = new User({
-      username,
-      email,
-      password_hash: hashedPassword,
-      verificationToken,
-      verificationExpiry
-    });
-    
-    // Save user
-    await newUser.save();
-    
-    // Create profile
-    const newProfile = new Profile({
-      username,
-      name: username,
-      avatar: '',
-      banner: '',
-      bio: '',
-      links: [],
-      theme: 'light',
-      customCSS: ''
-    });
-    
-    await newProfile.save();
-    
-    // Create email mapping
-    const newEmail = new Email({
-      email,
-      username
-    });
-    
-    await newEmail.save();
-    
-    // Generate JWT
-    const token = generateJWT({ username, iss: 'hostnet', aud: 'hostnet-users' });
-    res.json({ token, username, verified: false });
-  } catch (err) {
-    console.error('Registration error:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Login endpoint
-app.post('/api/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    // Validate inputs
-    const emailError = validateEmail(email);
-    const passwordError = validatePassword(password);
-    if (emailError) return res.status(400).json({ error: emailError });
-    if (passwordError) return res.status(400).json({ error: passwordError });
-    
-    // Find user
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-    
-    // Verify password
-    const isValid = await bcrypt.compare(password, user.password_hash);
-    if (!isValid) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-    
-    // Generate JWT
-    const token = generateJWT({ username: user.username, iss: 'hostnet', aud: 'hostnet-users' });
-    res.json({ token, username: user.username });
-  } catch (err) {
-    console.error('Login error:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Get user profile with view counting
-app.get('/api/user/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    
-    // Find profile
-    const profile = await Profile.findOne({ username: id });
-    if (!profile) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-    
-    // Increment view count (but only once per session/IP)
-    try {
-      // Find or create view record
-      let viewRecord = await View.findOne({ username: id });
-      
-      if (!viewRecord) {
-        viewRecord = new View({
-          username: id,
-          total: 0,
-          daily: {},
-          ipTracking: {}
-        });
-      }
-      
-      // Simple IP tracking (in a real app, you'd want better tracking)
-      const ip = req.ip || 'unknown';
-      const today = new Date().toISOString().split('T')[0];
-      
-      if (!viewRecord.daily[today]) {
-        viewRecord.daily[today] = 0;
-      }
-      
-      // Only increment if not tracked for this IP today
-      if (!viewRecord.ipTracking[ip]) {
-        viewRecord.total += 1;
-        viewRecord.daily[today] += 1;
-        viewRecord.ipTracking[ip] = today;
-        await viewRecord.save();
-      }
-    } catch (err) {
-      console.error('View tracking failed:', err);
-    }
-    
-    // Remove sensitive data
-    const publicProfile = {
-      name: profile.name,
-      avatar: profile.avatar,
-      banner: profile.banner,
-      bio: profile.bio,
-      links: profile.links,
-      theme: profile.theme
-    };
-    
-    res.json(publicProfile);
-  } catch (err) {
-    console.error('Get user profile error:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Get list of all user profiles
-app.get('/api/users', async (req, res) => {
-  try {
-    const profiles = await Profile.find({}, { 
-      username: 1, 
-      name: 1, 
-      avatar: 1, 
-      banner: 1, 
-      bio: 1, 
-      links: 1, 
-      theme: 1 
-    });
-    
-    const usersList = profiles.map(profile => ({
-      username: profile.username,
-      name: profile.name,
-      avatar: profile.avatar,
-      banner: profile.banner,
-      bio: profile.bio,
-      links: profile.links,
-      theme: profile.theme
-    }));
-    
-    res.json({ users: usersList, total: usersList.length });
-  } catch (err) {
-    console.error('Get all users error:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Update user profile
-app.post('/api/user/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    const decoded = verifyJWT(token);
-    if (!decoded || decoded.username !== id) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    
-    const { name, avatar, banner, bio, links, newUsername, theme, customCSS } = req.body;
-    
-    // Find current user
-    const user = await User.findOne({ username: id });
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-    
-    // Validate new username if provided
-    let updatedUsername = id;
-    if (newUsername && newUsername !== id) {
-      const usernameError = validateUsername(newUsername);
-      if (usernameError) {
-        return res.status(400).json({ error: usernameError });
-      }
-      
-      // Check username cooldown
-      const usernameHistory = await UsernameHistory.findOne({ username: newUsername });
-      if (usernameHistory) {
-        const lastUsed = new Date(usernameHistory.lastUsed);
-        const now = new Date();
-        const diffDays = Math.floor((now - lastUsed) / (1000 * 60 * 60 * 24));
-        if (diffDays < 7) {
-          return res.status(400).json({ error: 'Username is on cooldown' });
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>[TITLE]</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f5f7fa;
+            margin: 0;
+            padding: 0;
+            color: #333;
         }
-      }
-      
-      // Check if username already exists
-      const existingUser = await User.findOne({ username: newUsername });
-      if (existingUser) {
-        return res.status(400).json({ error: 'Username already taken' });
-      }
-      
-      // Update username
-      updatedUsername = newUsername;
-      
-      // Update user document
-      user.username = newUsername;
-      await user.save();
-      
-      // Update email mapping
-      const email = await Email.findOne({ username: id });
-      if (email) {
-        email.username = newUsername;
-        await email.save();
-      }
-      
-      // Update profile
-      const profile = await Profile.findOne({ username: id });
-      if (profile) {
-        profile.username = newUsername;
-        await profile.save();
-      }
-      
-      // Add old username to history
-      const historyEntry = new UsernameHistory({
-        username: id,
-        lastUsed: new Date()
-      });
-      await historyEntry.save();
-    }
-    
-    // Update profile
-    const profile = await Profile.findOne({ username: updatedUsername });
-    if (profile) {
-      if (name) profile.name = name;
-      if (avatar) profile.avatar = avatar;
-      if (banner) profile.banner = banner;
-      if (bio) profile.bio = bio;
-      if (links) profile.links = links;
-      if (theme) profile.theme = theme;
-      if (customCSS) profile.customCSS = customCSS;
-      await profile.save();
-    }
-    
-    // Generate new token if username changed
-    let newToken = token;
-    if (updatedUsername !== id) {
-      newToken = generateJWT({ username: updatedUsername, iss: 'hostnet', aud: 'hostnet-users' });
-    }
-    
-    res.json({ token: newToken, username: updatedUsername });
-  } catch (err) {
-    console.error('Update user profile error:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Redirect endpoint
-app.get('/api/redirect/:user/:url', async (req, res) => {
-  try {
-    const { user, url } = req.params;
-    // Decode URL
-    const decodedUrl = decodeURIComponent(url);
-    
-    // Increment click count
-    try {
-      let clickRecord = await Click.findOne({ username: user, url: decodedUrl });
-      
-      if (!clickRecord) {
-        clickRecord = new Click({
-          username: user,
-          url: decodedUrl,
-          count: 0
-        });
-      }
-      
-      clickRecord.count++;
-      await clickRecord.save();
-    } catch (err) {
-      console.error('Click tracking failed:', err);
-    }
-    
-    // Redirect
-    res.redirect(302, decodedUrl);
-  } catch (err) {
-    console.error('Redirect error:', err);
-    // Fallback redirect to homepage
-    res.redirect(302, '/');
-  }
-});
-
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'OK', timestamp: new Date().toISOString() });
-});
-
-// Graceful shutdown
-process.on('SIGINT', async () => {
-  console.log('Shutting down gracefully...');
-  await mongoose.connection.close();
-  process.exit(0);
-});
-
-// Start server
-app.listen(PORT, () => {
-  console.log(`HostNet API server running on port ${PORT}`);
-});
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: white;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+        }
+        .header {
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            color: white;
+            padding: 30px 20px;
+            text-align: center;
+        }
+        .header h1 {
+            font-size: 28px;
+            margin: 0;
+            font-weight: 700;
+        }
+        .header p {
+            font-size: 16px;
+            opacity: 0.9;
+            margin: 10px 0 0;
+        }
+        .content {
+            padding: 30px;
+            text-align: center;
+        }
+        .content h2 {
+            color: #4b5563;
+            margin-bottom: 20px;
+            font-size: 22px;
+        }
+        .content p {
+            font-size: 16px;
+            line-height: 1.6;
+            color: #4b5563;
+            margin-bottom: 25px;
+        }
+        .verification-button {
+            display: inline-block;
+            padding: 16px 40px;
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            color: white;
+            text-decoration: none;
+            border-radius: 50px;
+            font-weight: 600;
+            font-size: 18px;
+            margin: 20px 0;
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
+            transition: all 0.3s ease;
+        }
+        .verification-button:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4);
+        }
+        .link-container {
+            background-color: #f9fafb;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 25px 0;
+            font-size: 14px;
+            word-break: break-all;
+        }
+        .footer {
+            background-color: #f9fafb;
+            padding: 25px;
+            text-align: center;
+            color: #6b7280;
+            font-size: 14px;
+            border-top: 1px solid #e5e7eb;
+        }
+        .footer p {
+            margin: 5px 0;
+        }
+        .logo {
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        .highlight {
+            background-color: #eff6ff;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: 500;
+        }
+        @media (max-width: 600px) {
+            .container {
+                margin: 10px;
+            }
+            .content {
+                padding: 20px;
+            }
+            .header {
+                padding: 20px 15px;
+            }
+            .verification-button {
+                padding: 14px 30px;
+                font-size: 16px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">HostNet</div>
+            <h1>[TITLE]</h1>
+            <p>[SUBJECT]</p>
+        </div>
+        
+        <div class="content">
+            <h2>Hello,</h2>
+            <p>[MESSAGE]</p>
+            
+            <a href="[VERIFICATION_LINK]" class="verification-button">[BUTTON_TEXT]</a>
+            
+            <p>If the button above doesn't work, please copy and paste the following link into your browser:</p>
+            
+            <div class="link-container">
+                [VERIFICATION_LINK]
+            </div>
+            
+            <p>This verification link will expire in [EXPIRY_TIME].</p>
+        </div>
+        
+        <div class="footer">
+            <p>© 2023 HostNet. All rights reserved.</p>
+            <p>Need help? Contact us at support@hostnet.wiki</p>
+        </div>
+    </div>
+</body>
+</html>
