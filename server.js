@@ -320,8 +320,10 @@ app.post('/api/register', async (req, res) => {
     if (usernameError) return res.status(400).json({ error: usernameError });
     if (emailError) return res.status(400).json({ error: emailError });
     if (passwordError) return res.status(400).json({ error: passwordError });
+
     const existingEmail = await Email.findOne({ email });
     if (existingEmail) return res.status(400).json({ error: 'Email already registered' });
+
     const usernameHistory = await UsernameHistory.findOne({ username });
     if (usernameHistory) {
       const lastUsed = new Date(usernameHistory.lastUsed);
@@ -329,11 +331,14 @@ app.post('/api/register', async (req, res) => {
       const diffDays = Math.floor((now - lastUsed) / (1000 * 60 * 60 * 24));
       if (diffDays < 7) return res.status(400).json({ error: 'Username is on cooldown' });
     }
+
     const existingUser = await User.findOne({ username });
     if (existingUser) return res.status(400).json({ error: 'Username already taken' });
+
     const hashedPassword = await bcrypt.hash(password, 12);
     const verificationToken = generateVerificationToken();
     const verificationExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
     const newUser = new User({
       username,
       email,
@@ -342,6 +347,7 @@ app.post('/api/register', async (req, res) => {
       verificationExpiry
     });
     await newUser.save();
+
     await new Profile({
       username,
       name: username,
@@ -352,7 +358,9 @@ app.post('/api/register', async (req, res) => {
       theme: 'light',
       customCSS: ''
     }).save();
+
     await new Email({ email, username }).save();
+
     // Send verification email
     if (transporter) {
       try {
@@ -371,6 +379,7 @@ app.post('/api/register', async (req, res) => {
         console.error('Failed to send verification email:', err);
       }
     }
+
     const token = generateJWT({ username, iss: 'hostnet', aud: 'hostnet-users' });
     res.json({ token, username, verified: false });
   } catch (err) {
@@ -390,6 +399,7 @@ app.get('/api/verify-email', async (req, res) => {
         <a href="/">Go Home</a>
       `);
     }
+
     const user = await User.findOne({ verificationToken: token });
     if (!user) {
       return res.status(400).send(`
@@ -398,6 +408,7 @@ app.get('/api/verify-email', async (req, res) => {
         <a href="/resend.html">Request a new link</a>
       `);
     }
+
     if (user.verificationExpiry < new Date()) {
       return res.status(400).send(`
         <h1>Link Expired</h1>
@@ -405,10 +416,12 @@ app.get('/api/verify-email', async (req, res) => {
         <a href="/resend.html">Click here to resend</a>
       `);
     }
+
     user.verified = true;
     user.verificationToken = undefined;
     user.verificationExpiry = undefined;
     await user.save();
+
     console.log(`Email verified for: ${user.email}`);
     res.redirect(302, '/verified.html');
   } catch (err) {
@@ -429,11 +442,14 @@ app.post('/api/login', async (req, res) => {
     const passwordError = validatePassword(password);
     if (emailError) return res.status(400).json({ error: emailError });
     if (passwordError) return res.status(400).json({ error: passwordError });
+
     const user = await User.findOne({ email });
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
     if (!user.verified) return res.status(401).json({ error: 'Please verify your email first' });
+
     const isValid = await bcrypt.compare(password, user.password_hash);
     if (!isValid) return res.status(401).json({ error: 'Invalid credentials' });
+
     const token = generateJWT({ username: user.username });
     res.json({ token, username: user.username, verified: user.verified });
   } catch (err) {
@@ -448,16 +464,21 @@ app.get('/api/user/:id', async (req, res) => {
     const { id } = req.params;
     const profile = await Profile.findOne({ username: id });
     if (!profile) return res.status(404).json({ error: 'User not found' });
+
+    // View tracking
     try {
       let viewRecord = await View.findOne({ username: id });
       if (!viewRecord) {
         viewRecord = new View({ username: id, total: 0, daily: {}, ipTracking: {} });
       }
+
       const ip = req.ip || 'unknown';
       const today = new Date().toISOString().split('T')[0];
+
       if (!viewRecord.daily[today]) {
         viewRecord.daily[today] = 0;
       }
+
       if (!viewRecord.ipTracking[ip]) {
         viewRecord.total += 1;
         viewRecord.daily[today] += 1;
@@ -467,6 +488,7 @@ app.get('/api/user/:id', async (req, res) => {
     } catch (err) {
       console.error('View tracking failed:', err);
     }
+
     res.json({
       name: profile.name,
       avatar: profile.avatar,
@@ -501,12 +523,17 @@ app.post('/api/user/:id', async (req, res) => {
     const { id } = req.params;
     const token = req.headers.authorization?.split(' ')[1];
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
+
     const decoded = verifyJWT(token);
     if (!decoded || decoded.username !== id) return res.status(401).json({ error: 'Unauthorized' });
+
     const { name, avatar, banner, bio, links, newUsername, theme, customCSS } = req.body;
+
     const user = await User.findOne({ username: id });
     if (!user) return res.status(404).json({ error: 'User not found' });
+
     let updatedUsername = id;
+
     if (newUsername && newUsername !== id) {
       if (validateUsername(newUsername)) return res.status(400).json({ error: validateUsername(newUsername) });
       const history = await UsernameHistory.findOne({ username: newUsername });
@@ -514,6 +541,7 @@ app.post('/api/user/:id', async (req, res) => {
         return res.status(400).json({ error: 'Username is on cooldown' });
       }
       if (await User.findOne({ username: newUsername })) return res.status(400).json({ error: 'Username already taken' });
+
       user.username = newUsername;
       await user.save();
       await Email.findOneAndUpdate({ username: id }, { username: newUsername });
@@ -521,6 +549,7 @@ app.post('/api/user/:id', async (req, res) => {
       await new UsernameHistory({ username: id, lastUsed: new Date() }).save();
       updatedUsername = newUsername;
     }
+
     const profile = await Profile.findOne({ username: updatedUsername });
     if (profile) {
       profile.name = name ?? profile.name;
@@ -532,6 +561,7 @@ app.post('/api/user/:id', async (req, res) => {
       profile.customCSS = customCSS ?? profile.customCSS;
       await profile.save();
     }
+
     const newToken = updatedUsername !== id ? generateJWT({ username: updatedUsername }) : token;
     res.json({ token: newToken, username: updatedUsername });
   } catch (err) {
@@ -545,6 +575,7 @@ app.get('/api/redirect/:user/:url', async (req, res) => {
   try {
     const { user, url } = req.params;
     const decodedUrl = decodeURIComponent(url);
+
     try {
       const click = await Click.findOne({ username: user, url: decodedUrl }) || new Click({ username: user, url: decodedUrl });
       click.count++;
@@ -552,6 +583,7 @@ app.get('/api/redirect/:user/:url', async (req, res) => {
     } catch (err) {
       console.error('Click tracking failed:', err);
     }
+
     res.redirect(302, decodedUrl);
   } catch (err) {
     console.error('Redirect error:', err);
@@ -565,18 +597,23 @@ app.post('/api/resend-verification', async (req, res) => {
     const { email } = req.body;
     const emailError = validateEmail(email);
     if (emailError) return res.status(400).json({ error: emailError });
+
     const user = await User.findOne({ email });
     if (!user) {
       return res.json({ message: 'If your email is registered and unverified, a new verification link has been sent.' });
     }
+
     if (user.verified) {
       return res.json({ message: 'This email is already verified.' });
     }
+
     const newVerificationToken = generateVerificationToken();
     const newVerificationExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
     user.verificationToken = newVerificationToken;
     user.verificationExpiry = newVerificationExpiry;
     await user.save();
+
     if (transporter) {
       try {
         const verificationLink = `${BASE_URL}/api/verify-email?token=${newVerificationToken}`;
@@ -595,6 +632,7 @@ app.post('/api/resend-verification', async (req, res) => {
         return res.status(500).json({ error: 'Failed to send email. Please try again later.' });
       }
     }
+
     res.json({ message: 'A new verification link has been sent to your email.' });
   } catch (err) {
     console.error('Resend verification error:', err);
@@ -606,22 +644,20 @@ app.post('/api/resend-verification', async (req, res) => {
 app.get('/api/dashboard/:username', async (req, res) => {
   try {
     const { username } = req.params;
+
     // Fetch profile
     const profile = await Profile.findOne({ username });
     if (!profile) return res.status(404).json({ error: 'User not found' });
+
     // Fetch view data
     const viewRecord = await View.findOne({ username });
     const totalViews = viewRecord?.total || 0;
     const dailyViews = viewRecord?.daily || {};
     const today = new Date().toISOString().split('T')[0];
-    // Calculate views this week (last 7 days)
-    const weekAgo = new Date();
-    weekAgo.setDate(weekAgo.getDate() - 7);
-    const weeklyViews = Object.entries(dailyViews)
-      .filter(([date]) => new Date(date) >= weekAgo)
-      .reduce((sum, [, count]) => sum + count, 0);
-    // Unique views
-    const uniqueViews = Object.keys(viewRecord?.ipTracking || {}).length;
+    const viewsThisWeek = Object.values(dailyViews)
+      .slice(-7)
+      .reduce((a, b) => a + b, 0);
+
     // Fetch clicks
     const clickRecords = await Click.find({ username });
     const totalClicks = clickRecords.reduce((sum, c) => sum + c.count, 0);
@@ -632,20 +668,29 @@ app.get('/api/dashboard/:username', async (req, res) => {
         return new Date(c.updatedAt) > last7Days;
       })
       .reduce((sum, c) => sum + c.count, 0);
+
     // Top 5 links
     const topLinks = clickRecords
       .sort((a, b) => b.count - a.count)
       .slice(0, 5)
       .map(c => ({ title: c.url.split('/').filter(Boolean).pop() || 'Unnamed', url: c.url, clicks: c.count }));
+
     // Views timeline for chart
     const timeline = Object.entries(dailyViews)
       .map(([date, count]) => ({ date, count }))
       .sort((a, b) => new Date(a.date) - new Date(b.date));
+
     res.json({
+      profile: {
+        username: profile.username,
+        email: 'user@hidden.com',
+        uid: '#141768',
+        coins: 0
+      },
       stats: {
         totalViews,
-        uniqueViews,
-        viewsThisWeek: weeklyViews,
+        uniqueViews: Object.keys(viewRecord?.ipTracking || {}).length,
+        viewsThisWeek,
         clicksThisWeek,
         totalClicks
       },
@@ -678,6 +723,7 @@ async function startServer() {
     setInterval(cleanupUnverifiedAccounts, 24 * 60 * 60 * 1000); // every 24h
   });
 }
+
 startServer().catch(err => {
   console.error('Failed to start server:', err);
   process.exit(1);
