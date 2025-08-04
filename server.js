@@ -53,42 +53,36 @@ async function initializeDataFiles() {
     } catch {
       await fs.writeFile(USERS_FILE, '{}');
     }
-
     // Profiles file
     try {
       await fs.access(PROFILES_FILE);
     } catch {
       await fs.writeFile(PROFILES_FILE, '{}');
     }
-
     // Emails file
     try {
       await fs.access(EMAILS_FILE);
     } catch {
       await fs.writeFile(EMAILS_FILE, '{}');
     }
-
     // Username history file
     try {
       await fs.access(USERNAME_HISTORY_FILE);
     } catch {
       await fs.writeFile(USERNAME_HISTORY_FILE, '{}');
     }
-
     // Clicks file
     try {
       await fs.access(CLICKS_FILE);
     } catch {
       await fs.writeFile(CLICKS_FILE, '{}');
     }
-
     // Rate limits file
     try {
       await fs.access(RATE_LIMITS_FILE);
     } catch {
       await fs.writeFile(RATE_LIMITS_FILE, '{}');
     }
-
     // Views file
     try {
       await fs.access(VIEWS_FILE);
@@ -176,6 +170,7 @@ function validatePassword(password) {
 }
 
 // Routes
+
 // Register endpoint
 app.post('/api/register', async (req, res) => {
   try {
@@ -285,36 +280,29 @@ app.get('/api/user/:id', async (req, res) => {
     const { id } = req.params;
     const profiles = await readJSONFile(PROFILES_FILE);
     const profile = profiles[id];
-    
     if (!profile) {
       return res.status(404).json({ error: 'User not found' });
     }
-    
     // Increment view count (but only once per session/IP)
     try {
       const views = await readJSONFile(VIEWS_FILE);
       if (!views[id]) views[id] = { total: 0, daily: {}, ipTracking: {} };
-      
       // Simple IP tracking (in a real app, you'd want better tracking)
       const ip = req.ip || 'unknown';
       const today = new Date().toISOString().split('T')[0];
-      
       if (!views[id].daily[today]) {
         views[id].daily[today] = 0;
       }
-      
       // Only increment if not tracked for this IP today
       if (!views[id].ipTracking[ip]) {
         views[id].total += 1;
         views[id].daily[today] += 1;
         views[id].ipTracking[ip] = today;
       }
-      
       await atomicWrite(VIEWS_FILE, views);
     } catch (err) {
       console.error('View tracking failed:', err);
     }
-    
     // Remove sensitive data
     const publicProfile = {
       name: profile.name,
@@ -324,10 +312,31 @@ app.get('/api/user/:id', async (req, res) => {
       links: profile.links,
       theme: profile.theme
     };
-    
     res.json(publicProfile);
   } catch (err) {
     console.error('Get user profile error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get list of all user profiles
+app.get('/api/users', async (req, res) => {
+  try {
+    const profiles = await readJSONFile(PROFILES_FILE);
+
+    const usersList = Object.entries(profiles).map(([username, profile]) => ({
+      username,
+      name: profile.name,
+      avatar: profile.avatar,
+      banner: profile.banner,
+      bio: profile.bio,
+      links: profile.links,
+      theme: profile.theme
+    }));
+
+    res.json({ users: usersList, total: usersList.length });
+  } catch (err) {
+    console.error('Get all users error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -459,7 +468,6 @@ async function startServer() {
     console.log(`HostNet API server running on port ${PORT}`);
   });
 }
-
 startServer().catch(err => {
   console.error('Failed to start server:', err);
   process.exit(1);
