@@ -8,7 +8,7 @@ const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const { v4: uuidv4 } = require('uuid');
 const mongoose = require('mongoose');
-const nodemailer = require('nodemailer');
+const nodemailer = require('nodemailer'); // This should be correct
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -40,22 +40,28 @@ mongoose.connect(MONGO_URI, {
 });
 
 // Email transporter setup
-const transporter = nodemailer.createTransporter({
-  service: 'gmail',
-  auth: {
-    user: process.env.APP_E,
-    pass: process.env.APP_P
-  }
-});
-
-// Verify email configuration
-transporter.verify((error, success) => {
-  if (error) {
-    console.error('Email configuration error:', error);
-  } else {
-    console.log('Email server is ready to send messages');
-  }
-});
+let transporter;
+try {
+  transporter = nodemailer.createTransporter({
+    service: 'gmail',
+    auth: {
+      user: process.env.APP_E,
+      pass: process.env.APP_P
+    }
+  });
+  
+  // Verify email configuration
+  transporter.verify((error, success) => {
+    if (error) {
+      console.error('Email configuration error:', error);
+    } else {
+      console.log('Email server is ready to send messages');
+    }
+  });
+} catch (error) {
+  console.error('Failed to create email transporter:', error);
+  transporter = null;
+}
 
 // User Schema
 const userSchema = new mongoose.Schema({
@@ -243,19 +249,21 @@ async function cleanupUnverifiedAccounts() {
     for (const user of unverifiedUsers) {
       try {
         // Send warning email
-        const template = await getEmailTemplate('warning');
-        const verificationLink = `https://hostnet.wiki/verify-email?token=${user.verificationToken}`;
-        const emailContent = template.replace('[VERIFICATION_LINK]', verificationLink);
-        
-        const mailOptions = {
-          from: process.env.APP_E,
-          to: user.email,
-          subject: 'Important: Your Account Will Be Deleted',
-          html: emailContent
-        };
-        
-        await transporter.sendMail(mailOptions);
-        console.log(`Warning email sent to unverified user: ${user.email}`);
+        if (transporter) {
+          const template = await getEmailTemplate('warning');
+          const verificationLink = `https://hostnet.wiki/verify-email?token=${user.verificationToken}`;
+          const emailContent = template.replace('[VERIFICATION_LINK]', verificationLink);
+          
+          const mailOptions = {
+            from: process.env.APP_E,
+            to: user.email,
+            subject: 'Important: Your Account Will Be Deleted',
+            html: emailContent
+          };
+          
+          await transporter.sendMail(mailOptions);
+          console.log(`Warning email sent to unverified user: ${user.email}`);
+        }
         
         // Schedule final deletion in 24 hours
         setTimeout(async () => {
@@ -279,18 +287,20 @@ async function deleteAccount(email) {
     if (!user) return;
     
     // Send deleted email
-    const template = await getEmailTemplate('deleted');
-    const emailContent = template.replace('[VERIFICATION_LINK]', 'https://hostnet.wiki/sign');
-    
-    const mailOptions = {
-      from: process.env.APP_E,
-      to: email,
-      subject: 'Your Account Has Been Deleted',
-      html: emailContent
-    };
-    
-    await transporter.sendMail(mailOptions);
-    console.log(`Deleted email sent to: ${email}`);
+    if (transporter) {
+      const template = await getEmailTemplate('deleted');
+      const emailContent = template.replace('[VERIFICATION_LINK]', 'https://hostnet.wiki/sign');
+      
+      const mailOptions = {
+        from: process.env.APP_E,
+        to: email,
+        subject: 'Your Account Has Been Deleted',
+        html: emailContent
+      };
+      
+      await transporter.sendMail(mailOptions);
+      console.log(`Deleted email sent to: ${email}`);
+    }
     
     // Delete user and related data
     await User.deleteOne({ email });
@@ -387,23 +397,25 @@ app.post('/api/register', async (req, res) => {
     await newEmail.save();
     
     // Send verification email
-    try {
-      const verificationLink = `https://hostnet.wiki/verify-email?token=${verificationToken}`;
-      const template = await getEmailTemplate('verification');
-      const emailContent = template.replace('[VERIFICATION_LINK]', verificationLink);
-      
-      const mailOptions = {
-        from: process.env.APP_E,
-        to: email,
-        subject: 'Verify Your HostNet Account',
-        html: emailContent
-      };
-      
-      await transporter.sendMail(mailOptions);
-      console.log('Verification email sent successfully');
-    } catch (emailError) {
-      console.error('Failed to send verification email:', emailError);
-      // Continue with registration even if email fails
+    if (transporter) {
+      try {
+        const verificationLink = `https://hostnet.wiki/verify-email?token=${verificationToken}`;
+        const template = await getEmailTemplate('verification');
+        const emailContent = template.replace('[VERIFICATION_LINK]', verificationLink);
+        
+        const mailOptions = {
+          from: process.env.APP_E,
+          to: email,
+          subject: 'Verify Your HostNet Account',
+          html: emailContent
+        };
+        
+        await transporter.sendMail(mailOptions);
+        console.log('Verification email sent successfully');
+      } catch (emailError) {
+        console.error('Failed to send verification email:', emailError);
+        // Continue with registration even if email fails
+      }
     }
     
     // Generate JWT
