@@ -2,10 +2,13 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const fs = require('fs').promises;
+const path = require('path');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const { v4: uuidv4 } = require('uuid');
 const mongoose = require('mongoose');
+const nodemailer = require('nodemailer');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -36,11 +39,32 @@ mongoose.connect(MONGO_URI, {
   process.exit(1);
 });
 
+// Email transporter setup
+const transporter = nodemailer.createTransporter({
+  service: 'gmail',
+  auth: {
+    user: process.env.APP_E,
+    pass: process.env.APP_P
+  }
+});
+
+// Verify email configuration
+transporter.verify((error, success) => {
+  if (error) {
+    console.error('Email configuration error:', error);
+  } else {
+    console.log('Email server is ready to send messages');
+  }
+});
+
 // User Schema
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   email: { type: String, required: true, unique: true },
   password_hash: { type: String, required: true },
+  verified: { type: Boolean, default: false },
+  verificationToken: { type: String },
+  verificationExpiry: { type: Date },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -106,6 +130,78 @@ function verifyJWT(token) {
   }
 }
 
+// Generate verification token
+function generateVerificationToken() {
+  return uuidv4();
+}
+
+// Read email template
+async function getEmailTemplate(templateType) {
+  try {
+    const templatePath = path.join(__dirname, 'email.html');
+    const template = await fs.readFile(templatePath, 'utf8');
+    
+    if (templateType === 'verification') {
+      return template.replace('[TEMPLATE_TYPE]', 'verification')
+        .replace('[TITLE]', 'Verify Your HostNet Account')
+        .replace('[SUBJECT]', 'Verify Your HostNet Account')
+        .replace('[MESSAGE]', 'Thank you for signing up with HostNet! Please verify your email address by clicking the button below:')
+        .replace('[BUTTON_TEXT]', 'Verify Email')
+        .replace('[EXPIRY_TIME]', '24 hours');
+    } else if (templateType === 'warning') {
+      return template.replace('[TEMPLATE_TYPE]', 'warning')
+        .replace('[TITLE]', 'Important: Your Account Will Be Deleted')
+        .replace('[SUBJECT]', 'Important: Your Account Will Be Deleted')
+        .replace('[MESSAGE]', 'We noticed that your email has not been verified within 24 hours. Your account will be deleted in 24 hours unless you verify your email.')
+        .replace('[BUTTON_TEXT]', 'Verify Now')
+        .replace('[EXPIRY_TIME]', '24 hours');
+    } else if (templateType === 'deleted') {
+      return template.replace('[TEMPLATE_TYPE]', 'deleted')
+        .replace('[TITLE]', 'Your Account Has Been Deleted')
+        .replace('[SUBJECT]', 'Your Account Has Been Deleted')
+        .replace('[MESSAGE]', 'Your HostNet account has been deleted due to unverified email. You can create a new account anytime.')
+        .replace('[BUTTON_TEXT]', 'Create New Account')
+        .replace('[EXPIRY_TIME]', 'n/a');
+    }
+    return template;
+  } catch (err) {
+    console.error('Error reading email template:', err);
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <style>
+          body { font-family: Arial, sans-serif; background-color: #f5f5f5; }
+          .container { max-width: 600px; margin: 0 auto; background-color: white; padding: 20px; border-radius: 8px; }
+          .header { background-color: #6366f1; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+          .content { padding: 20px; }
+          .button { display: inline-block; padding: 12px 24px; background-color: #6366f1; color: white; text-decoration: none; border-radius: 4px; margin: 20px 0; }
+          .footer { padding: 20px; text-align: center; color: #888; font-size: 12px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>[TITLE]</h1>
+          </div>
+          <div class="content">
+            <p>Hello,</p>
+            <p>[MESSAGE]</p>
+            <a href="[VERIFICATION_LINK]" class="button">[BUTTON_TEXT]</a>
+            <p>If the button doesn't work, copy and paste this link in your browser:</p>
+            <p>[VERIFICATION_LINK]</p>
+            <p>This link will expire in [EXPIRY_TIME].</p>
+          </div>
+          <div class="footer">
+            <p>&copy; 2023 HostNet. All rights reserved.</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+  }
+}
+
 // Validation helpers
 function validateUsername(username) {
   if (!username || username.length < 3 || username.length > 20) {
@@ -131,6 +227,85 @@ function validatePassword(password) {
   }
   return null;
 }
+
+// Scheduled cleanup task for unverified accounts
+async function cleanupUnverifiedAccounts() {
+  try {
+    const now = new Date();
+    const cutoffDate = new Date(now.getTime() - 24 * 60 * 60 * 1000); // 24 hours ago
+    
+    // Find unverified accounts older than 24 hours
+    const unverifiedUsers = await User.find({
+      verified: false,
+      createdAt: { $lt: cutoffDate }
+    });
+    
+    for (const user of unverifiedUsers) {
+      try {
+        // Send warning email
+        const template = await getEmailTemplate('warning');
+        const verificationLink = `https://hostnet.wiki/verify-email?token=${user.verificationToken}`;
+        const emailContent = template.replace('[VERIFICATION_LINK]', verificationLink);
+        
+        const mailOptions = {
+          from: process.env.APP_E,
+          to: user.email,
+          subject: 'Important: Your Account Will Be Deleted',
+          html: emailContent
+        };
+        
+        await transporter.sendMail(mailOptions);
+        console.log(`Warning email sent to unverified user: ${user.email}`);
+        
+        // Schedule final deletion in 24 hours
+        setTimeout(async () => {
+          await deleteAccount(user.email);
+        }, 24 * 60 * 60 * 1000); // 24 hours
+        
+      } catch (emailErr) {
+        console.error('Failed to send warning email:', emailErr);
+      }
+    }
+  } catch (err) {
+    console.error('Cleanup error:', err);
+  }
+}
+
+// Delete account function
+async function deleteAccount(email) {
+  try {
+    // Find user by email
+    const user = await User.findOne({ email });
+    if (!user) return;
+    
+    // Send deleted email
+    const template = await getEmailTemplate('deleted');
+    const emailContent = template.replace('[VERIFICATION_LINK]', 'https://hostnet.wiki/sign');
+    
+    const mailOptions = {
+      from: process.env.APP_E,
+      to: email,
+      subject: 'Your Account Has Been Deleted',
+      html: emailContent
+    };
+    
+    await transporter.sendMail(mailOptions);
+    console.log(`Deleted email sent to: ${email}`);
+    
+    // Delete user and related data
+    await User.deleteOne({ email });
+    await Profile.deleteOne({ username: user.username });
+    await Email.deleteOne({ email });
+    await UsernameHistory.deleteOne({ username: user.username });
+    
+    console.log(`Account deleted for email: ${email}`);
+  } catch (err) {
+    console.error('Account deletion error:', err);
+  }
+}
+
+// Schedule cleanup every hour
+setInterval(cleanupUnverifiedAccounts, 60 * 60 * 1000);
 
 // Routes
 
@@ -173,11 +348,17 @@ app.post('/api/register', async (req, res) => {
     const saltRounds = 12;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
     
+    // Generate verification token and expiry
+    const verificationToken = generateVerificationToken();
+    const verificationExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+    
     // Create user
     const newUser = new User({
       username,
       email,
-      password_hash: hashedPassword
+      password_hash: hashedPassword,
+      verificationToken,
+      verificationExpiry
     });
     
     // Save user
@@ -205,11 +386,65 @@ app.post('/api/register', async (req, res) => {
     
     await newEmail.save();
     
+    // Send verification email
+    try {
+      const verificationLink = `https://hostnet.wiki/verify-email?token=${verificationToken}`;
+      const template = await getEmailTemplate('verification');
+      const emailContent = template.replace('[VERIFICATION_LINK]', verificationLink);
+      
+      const mailOptions = {
+        from: process.env.APP_E,
+        to: email,
+        subject: 'Verify Your HostNet Account',
+        html: emailContent
+      };
+      
+      await transporter.sendMail(mailOptions);
+      console.log('Verification email sent successfully');
+    } catch (emailError) {
+      console.error('Failed to send verification email:', emailError);
+      // Continue with registration even if email fails
+    }
+    
     // Generate JWT
     const token = generateJWT({ username, iss: 'hostnet', aud: 'hostnet-users' });
-    res.json({ token, username });
+    res.json({ token, username, verified: false });
   } catch (err) {
     console.error('Registration error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Verify email endpoint
+app.get('/api/verify-email', async (req, res) => {
+  try {
+    const { token } = req.query;
+    
+    if (!token) {
+      return res.status(400).json({ error: 'Verification token is required' });
+    }
+    
+    // Find user with matching token
+    const user = await User.findOne({ verificationToken: token });
+    
+    if (!user) {
+      return res.status(400).json({ error: 'Invalid or expired verification token' });
+    }
+    
+    // Check if token has expired
+    if (user.verificationExpiry < new Date()) {
+      return res.status(400).json({ error: 'Verification token has expired' });
+    }
+    
+    // Verify the user
+    user.verified = true;
+    user.verificationToken = undefined;
+    user.verificationExpiry = undefined;
+    await user.save();
+    
+    res.json({ message: 'Email verified successfully', verified: true });
+  } catch (err) {
+    console.error('Email verification error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -230,6 +465,11 @@ app.post('/api/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
     
+    // Check if user is verified
+    if (!user.verified) {
+      return res.status(401).json({ error: 'Please verify your email address first' });
+    }
+    
     // Verify password
     const isValid = await bcrypt.compare(password, user.password_hash);
     if (!isValid) {
@@ -238,7 +478,7 @@ app.post('/api/login', async (req, res) => {
     
     // Generate JWT
     const token = generateJWT({ username: user.username, iss: 'hostnet', aud: 'hostnet-users' });
-    res.json({ token, username: user.username });
+    res.json({ token, username: user.username, verified: user.verified });
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -486,4 +726,7 @@ process.on('SIGINT', async () => {
 // Start server
 app.listen(PORT, () => {
   console.log(`HostNet API server running on port ${PORT}`);
+  
+  // Initial cleanup run
+  cleanupUnverifiedAccounts();
 });
