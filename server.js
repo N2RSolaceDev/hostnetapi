@@ -2,11 +2,10 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const fs = require('fs').promises;
-const path = require('path');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const { v4: uuidv4 } = require('uuid');
+const mongoose = require('mongoose');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -25,110 +24,74 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// Data directory
-const DATA_DIR = './data';
-const USERS_FILE = path.join(DATA_DIR, 'users.json');
-const PROFILES_FILE = path.join(DATA_DIR, 'profiles.json');
-const EMAILS_FILE = path.join(DATA_DIR, 'emails.json');
-const USERNAME_HISTORY_FILE = path.join(DATA_DIR, 'username_history.json');
-const CLICKS_FILE = path.join(DATA_DIR, 'clicks.json');
-const RATE_LIMITS_FILE = path.join(DATA_DIR, 'rate_limits.json');
-const VIEWS_FILE = path.join(DATA_DIR, 'views.json'); // New file for view tracking
+// Connect to MongoDB using environment variable
+const MONGO_URI = process.env.MONGO_URI;
+mongoose.connect(MONGO_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => console.log('Connected to MongoDB'))
+.catch((err) => {
+  console.error('MongoDB connection error:', err);
+  process.exit(1);
+});
 
-// Ensure data directory exists
-async function ensureDataDirectory() {
-  try {
-    await fs.access(DATA_DIR);
-  } catch {
-    await fs.mkdir(DATA_DIR, { recursive: true });
-  }
-}
+// User Schema
+const userSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true },
+  email: { type: String, required: true, unique: true },
+  password_hash: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now }
+});
 
-// Initialize data files with defaults
-async function initializeDataFiles() {
-  try {
-    // Users file
-    try {
-      await fs.access(USERS_FILE);
-    } catch {
-      await fs.writeFile(USERS_FILE, '{}');
-    }
-    // Profiles file
-    try {
-      await fs.access(PROFILES_FILE);
-    } catch {
-      await fs.writeFile(PROFILES_FILE, '{}');
-    }
-    // Emails file
-    try {
-      await fs.access(EMAILS_FILE);
-    } catch {
-      await fs.writeFile(EMAILS_FILE, '{}');
-    }
-    // Username history file
-    try {
-      await fs.access(USERNAME_HISTORY_FILE);
-    } catch {
-      await fs.writeFile(USERNAME_HISTORY_FILE, '{}');
-    }
-    // Clicks file
-    try {
-      await fs.access(CLICKS_FILE);
-    } catch {
-      await fs.writeFile(CLICKS_FILE, '{}');
-    }
-    // Rate limits file
-    try {
-      await fs.access(RATE_LIMITS_FILE);
-    } catch {
-      await fs.writeFile(RATE_LIMITS_FILE, '{}');
-    }
-    // Views file
-    try {
-      await fs.access(VIEWS_FILE);
-    } catch {
-      await fs.writeFile(VIEWS_FILE, '{}');
-    }
-  } catch (err) {
-    console.error('Error initializing data files:', err);
-  }
-}
+// Profile Schema
+const profileSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true },
+  name: { type: String, default: '' },
+  avatar: { type: String, default: '' },
+  banner: { type: String, default: '' },
+  bio: { type: String, default: '' },
+  links: { type: Array, default: [] },
+  theme: { type: String, default: 'light' },
+  customCSS: { type: String, default: '' }
+});
+
+// Email Mapping Schema
+const emailSchema = new mongoose.Schema({
+  email: { type: String, required: true, unique: true },
+  username: { type: String, required: true }
+});
+
+// Username History Schema
+const usernameHistorySchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true },
+  lastUsed: { type: Date, default: Date.now }
+});
+
+// Clicks Schema
+const clickSchema = new mongoose.Schema({
+  username: { type: String, required: true },
+  url: { type: String, required: true },
+  count: { type: Number, default: 0 }
+});
+
+// View Schema
+const viewSchema = new mongoose.Schema({
+  username: { type: String, required: true },
+  total: { type: Number, default: 0 },
+  daily: { type: Map, of: Number, default: {} },
+  ipTracking: { type: Map, of: String, default: {} }
+});
+
+// Model definitions
+const User = mongoose.model('User', userSchema);
+const Profile = mongoose.model('Profile', profileSchema);
+const Email = mongoose.model('Email', emailSchema);
+const UsernameHistory = mongoose.model('UsernameHistory', usernameHistorySchema);
+const Click = mongoose.model('Click', clickSchema);
+const View = mongoose.model('View', viewSchema);
 
 // Helper functions
-async function readJSONFile(filePath) {
-  try {
-    const data = await fs.readFile(filePath, 'utf8');
-    return JSON.parse(data);
-  } catch (err) {
-    return {};
-  }
-}
-
-async function writeJSONFile(filePath, data) {
-  try {
-    await fs.writeFile(filePath, JSON.stringify(data, null, 2));
-    return true;
-  } catch (err) {
-    console.error(`Error writing to ${filePath}:`, err);
-    return false;
-  }
-}
-
-async function atomicWrite(filePath, data) {
-  const tempPath = `${filePath}.tmp`;
-  try {
-    await fs.writeFile(tempPath, JSON.stringify(data, null, 2));
-    await fs.rename(tempPath, filePath);
-    return true;
-  } catch (err) {
-    console.error(`Atomic write failed for ${filePath}:`, err);
-    try {
-      await fs.unlink(tempPath);
-    } catch {}
-    return false;
-  }
-}
-
 function generateJWT(payload) {
   const secret = process.env.JWT_SECRET || 'default_secret_key';
   return jwt.sign(payload, secret, { expiresIn: '24h' });
@@ -182,40 +145,47 @@ app.post('/api/register', async (req, res) => {
     if (usernameError) return res.status(400).json({ error: usernameError });
     if (emailError) return res.status(400).json({ error: emailError });
     if (passwordError) return res.status(400).json({ error: passwordError });
+    
     // Check if email already exists
-    const emails = await readJSONFile(EMAILS_FILE);
-    if (emails[email]) {
+    const existingEmail = await Email.findOne({ email });
+    if (existingEmail) {
       return res.status(400).json({ error: 'Email already registered' });
     }
+    
     // Check username cooldown
-    const usernameHistory = await readJSONFile(USERNAME_HISTORY_FILE);
-    if (usernameHistory[username]) {
-      const lastUsed = new Date(usernameHistory[username]);
+    const usernameHistory = await UsernameHistory.findOne({ username });
+    if (usernameHistory) {
+      const lastUsed = new Date(usernameHistory.lastUsed);
       const now = new Date();
       const diffDays = Math.floor((now - lastUsed) / (1000 * 60 * 60 * 24));
       if (diffDays < 7) {
         return res.status(400).json({ error: 'Username is on cooldown' });
       }
     }
+    
     // Check if username already exists
-    const users = await readJSONFile(USERS_FILE);
-    if (users[username]) {
+    const existingUser = await User.findOne({ username });
+    if (existingUser) {
       return res.status(400).json({ error: 'Username already taken' });
     }
+    
     // Hash password
     const saltRounds = 12;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
+    
     // Create user
-    const newUser = {
+    const newUser = new User({
+      username,
       email,
-      password_hash: hashedPassword,
-      createdAt: new Date().toISOString()
-    };
-    // Update data files
-    users[username] = newUser;
-    emails[email] = username;
-    const profiles = await readJSONFile(PROFILES_FILE);
-    profiles[username] = {
+      password_hash: hashedPassword
+    });
+    
+    // Save user
+    await newUser.save();
+    
+    // Create profile
+    const newProfile = new Profile({
+      username,
       name: username,
       avatar: '',
       banner: '',
@@ -223,18 +193,18 @@ app.post('/api/register', async (req, res) => {
       links: [],
       theme: 'light',
       customCSS: ''
-    };
-    const usernameHistoryUpdated = { ...usernameHistory };
-    delete usernameHistoryUpdated[username];
-    const success = await Promise.all([
-      atomicWrite(USERS_FILE, users),
-      atomicWrite(EMAILS_FILE, emails),
-      atomicWrite(PROFILES_FILE, profiles),
-      atomicWrite(USERNAME_HISTORY_FILE, usernameHistoryUpdated)
-    ]);
-    if (!success.every(Boolean)) {
-      return res.status(500).json({ error: 'Registration failed' });
-    }
+    });
+    
+    await newProfile.save();
+    
+    // Create email mapping
+    const newEmail = new Email({
+      email,
+      username
+    });
+    
+    await newEmail.save();
+    
     // Generate JWT
     const token = generateJWT({ username, iss: 'hostnet', aud: 'hostnet-users' });
     res.json({ token, username });
@@ -253,21 +223,22 @@ app.post('/api/login', async (req, res) => {
     const passwordError = validatePassword(password);
     if (emailError) return res.status(400).json({ error: emailError });
     if (passwordError) return res.status(400).json({ error: passwordError });
+    
     // Find user
-    const users = await readJSONFile(USERS_FILE);
-    const user = Object.entries(users).find(([_, userData]) => userData.email === email);
+    const user = await User.findOne({ email });
     if (!user) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
-    const [username, userData] = user;
+    
     // Verify password
-    const isValid = await bcrypt.compare(password, userData.password_hash);
+    const isValid = await bcrypt.compare(password, user.password_hash);
     if (!isValid) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
+    
     // Generate JWT
-    const token = generateJWT({ username, iss: 'hostnet', aud: 'hostnet-users' });
-    res.json({ token, username });
+    const token = generateJWT({ username: user.username, iss: 'hostnet', aud: 'hostnet-users' });
+    res.json({ token, username: user.username });
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -278,31 +249,46 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/user/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const profiles = await readJSONFile(PROFILES_FILE);
-    const profile = profiles[id];
+    
+    // Find profile
+    const profile = await Profile.findOne({ username: id });
     if (!profile) {
       return res.status(404).json({ error: 'User not found' });
     }
+    
     // Increment view count (but only once per session/IP)
     try {
-      const views = await readJSONFile(VIEWS_FILE);
-      if (!views[id]) views[id] = { total: 0, daily: {}, ipTracking: {} };
+      // Find or create view record
+      let viewRecord = await View.findOne({ username: id });
+      
+      if (!viewRecord) {
+        viewRecord = new View({
+          username: id,
+          total: 0,
+          daily: {},
+          ipTracking: {}
+        });
+      }
+      
       // Simple IP tracking (in a real app, you'd want better tracking)
       const ip = req.ip || 'unknown';
       const today = new Date().toISOString().split('T')[0];
-      if (!views[id].daily[today]) {
-        views[id].daily[today] = 0;
+      
+      if (!viewRecord.daily[today]) {
+        viewRecord.daily[today] = 0;
       }
+      
       // Only increment if not tracked for this IP today
-      if (!views[id].ipTracking[ip]) {
-        views[id].total += 1;
-        views[id].daily[today] += 1;
-        views[id].ipTracking[ip] = today;
+      if (!viewRecord.ipTracking[ip]) {
+        viewRecord.total += 1;
+        viewRecord.daily[today] += 1;
+        viewRecord.ipTracking[ip] = today;
+        await viewRecord.save();
       }
-      await atomicWrite(VIEWS_FILE, views);
     } catch (err) {
       console.error('View tracking failed:', err);
     }
+    
     // Remove sensitive data
     const publicProfile = {
       name: profile.name,
@@ -312,6 +298,7 @@ app.get('/api/user/:id', async (req, res) => {
       links: profile.links,
       theme: profile.theme
     };
+    
     res.json(publicProfile);
   } catch (err) {
     console.error('Get user profile error:', err);
@@ -322,10 +309,18 @@ app.get('/api/user/:id', async (req, res) => {
 // Get list of all user profiles
 app.get('/api/users', async (req, res) => {
   try {
-    const profiles = await readJSONFile(PROFILES_FILE);
-
-    const usersList = Object.entries(profiles).map(([username, profile]) => ({
-      username,
+    const profiles = await Profile.find({}, { 
+      username: 1, 
+      name: 1, 
+      avatar: 1, 
+      banner: 1, 
+      bio: 1, 
+      links: 1, 
+      theme: 1 
+    });
+    
+    const usersList = profiles.map(profile => ({
+      username: profile.username,
       name: profile.name,
       avatar: profile.avatar,
       banner: profile.banner,
@@ -333,7 +328,7 @@ app.get('/api/users', async (req, res) => {
       links: profile.links,
       theme: profile.theme
     }));
-
+    
     res.json({ users: usersList, total: usersList.length });
   } catch (err) {
     console.error('Get all users error:', err);
@@ -353,12 +348,15 @@ app.post('/api/user/:id', async (req, res) => {
     if (!decoded || decoded.username !== id) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
+    
     const { name, avatar, banner, bio, links, newUsername, theme, customCSS } = req.body;
-    // Read current data
-    const profiles = await readJSONFile(PROFILES_FILE);
-    const users = await readJSONFile(USERS_FILE);
-    const emails = await readJSONFile(EMAILS_FILE);
-    const usernameHistory = await readJSONFile(USERNAME_HISTORY_FILE);
+    
+    // Find current user
+    const user = await User.findOne({ username: id });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
     // Validate new username if provided
     let updatedUsername = id;
     if (newUsername && newUsername !== id) {
@@ -366,57 +364,72 @@ app.post('/api/user/:id', async (req, res) => {
       if (usernameError) {
         return res.status(400).json({ error: usernameError });
       }
-      // Check if username is on cooldown
-      if (usernameHistory[newUsername]) {
-        const lastUsed = new Date(usernameHistory[newUsername]);
+      
+      // Check username cooldown
+      const usernameHistory = await UsernameHistory.findOne({ username: newUsername });
+      if (usernameHistory) {
+        const lastUsed = new Date(usernameHistory.lastUsed);
         const now = new Date();
         const diffDays = Math.floor((now - lastUsed) / (1000 * 60 * 60 * 24));
         if (diffDays < 7) {
           return res.status(400).json({ error: 'Username is on cooldown' });
         }
       }
+      
       // Check if username already exists
-      if (users[newUsername]) {
+      const existingUser = await User.findOne({ username: newUsername });
+      if (existingUser) {
         return res.status(400).json({ error: 'Username already taken' });
       }
+      
       // Update username
       updatedUsername = newUsername;
-      // Move user data
-      users[newUsername] = users[id];
-      delete users[id];
+      
+      // Update user document
+      user.username = newUsername;
+      await user.save();
+      
       // Update email mapping
-      emails[users[newUsername].email] = newUsername;
-      delete emails[users[id].email];
+      const email = await Email.findOne({ username: id });
+      if (email) {
+        email.username = newUsername;
+        await email.save();
+      }
+      
       // Update profile
-      profiles[newUsername] = profiles[id];
-      delete profiles[id];
+      const profile = await Profile.findOne({ username: id });
+      if (profile) {
+        profile.username = newUsername;
+        await profile.save();
+      }
+      
       // Add old username to history
-      usernameHistory[id] = new Date().toISOString();
+      const historyEntry = new UsernameHistory({
+        username: id,
+        lastUsed: new Date()
+      });
+      await historyEntry.save();
     }
+    
     // Update profile
-    const profile = profiles[updatedUsername];
-    if (name) profile.name = name;
-    if (avatar) profile.avatar = avatar;
-    if (banner) profile.banner = banner;
-    if (bio) profile.bio = bio;
-    if (links) profile.links = links;
-    if (theme) profile.theme = theme;
-    if (customCSS) profile.customCSS = customCSS;
-    // Save changes
-    const success = await Promise.all([
-      atomicWrite(USERS_FILE, users),
-      atomicWrite(EMAILS_FILE, emails),
-      atomicWrite(PROFILES_FILE, profiles),
-      atomicWrite(USERNAME_HISTORY_FILE, usernameHistory)
-    ]);
-    if (!success.every(Boolean)) {
-      return res.status(500).json({ error: 'Update failed' });
+    const profile = await Profile.findOne({ username: updatedUsername });
+    if (profile) {
+      if (name) profile.name = name;
+      if (avatar) profile.avatar = avatar;
+      if (banner) profile.banner = banner;
+      if (bio) profile.bio = bio;
+      if (links) profile.links = links;
+      if (theme) profile.theme = theme;
+      if (customCSS) profile.customCSS = customCSS;
+      await profile.save();
     }
+    
     // Generate new token if username changed
     let newToken = token;
     if (updatedUsername !== id) {
       newToken = generateJWT({ username: updatedUsername, iss: 'hostnet', aud: 'hostnet-users' });
     }
+    
     res.json({ token: newToken, username: updatedUsername });
   } catch (err) {
     console.error('Update user profile error:', err);
@@ -425,21 +438,30 @@ app.post('/api/user/:id', async (req, res) => {
 });
 
 // Redirect endpoint
-app.get('/redirect/:user/:url', async (req, res) => {
+app.get('/api/redirect/:user/:url', async (req, res) => {
   try {
     const { user, url } = req.params;
     // Decode URL
     const decodedUrl = decodeURIComponent(url);
+    
     // Increment click count
     try {
-      const clicks = await readJSONFile(CLICKS_FILE);
-      if (!clicks[user]) clicks[user] = {};
-      if (!clicks[user][decodedUrl]) clicks[user][decodedUrl] = 0;
-      clicks[user][decodedUrl]++;
-      await atomicWrite(CLICKS_FILE, clicks);
+      let clickRecord = await Click.findOne({ username: user, url: decodedUrl });
+      
+      if (!clickRecord) {
+        clickRecord = new Click({
+          username: user,
+          url: decodedUrl,
+          count: 0
+        });
+      }
+      
+      clickRecord.count++;
+      await clickRecord.save();
     } catch (err) {
       console.error('Click tracking failed:', err);
     }
+    
     // Redirect
     res.redirect(302, decodedUrl);
   } catch (err) {
@@ -457,18 +479,11 @@ app.get('/health', (req, res) => {
 // Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('Shutting down gracefully...');
+  await mongoose.connection.close();
   process.exit(0);
 });
 
 // Start server
-async function startServer() {
-  await ensureDataDirectory();
-  await initializeDataFiles();
-  app.listen(PORT, () => {
-    console.log(`HostNet API server running on port ${PORT}`);
-  });
-}
-startServer().catch(err => {
-  console.error('Failed to start server:', err);
-  process.exit(1);
+app.listen(PORT, () => {
+  console.log(`HostNet API server running on port ${PORT}`);
 });
