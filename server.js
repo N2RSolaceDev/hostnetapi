@@ -11,23 +11,28 @@ const mongoose = require('mongoose');
 const nodemailer = require('nodemailer');
 const app = express();
 const PORT = process.env.PORT || 3000;
+
 // Base URL for email links
 const BASE_URL = process.env.BASE_URL || 'https://hostnetapi.onrender.com';
-// Serve static files (e.g., verified.html) from the current directory
+
+// Serve static files
 app.use(express.static(path.join(__dirname)));
+
 // Middleware
 app.use(express.json());
 app.use(cors({
   origin: ['https://hostnet.wiki', 'https://www.hostnet.wiki'],
   credentials: true
 }));
+
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
+  windowMs: 15 * 60 * 1000,
+  max: 100,
   message: 'Too many requests from this IP'
 });
 app.use(limiter);
+
 // Connect to MongoDB
 const MONGO_URI = process.env.MONGO_URI;
 mongoose.connect(MONGO_URI, {
@@ -39,7 +44,8 @@ mongoose.connect(MONGO_URI, {
     console.error('MongoDB connection error:', err);
     process.exit(1);
   });
-// Email transporter setup
+
+// Email transporter
 let transporter = null;
 try {
   if (process.env.APP_E && process.env.APP_P) {
@@ -50,20 +56,17 @@ try {
         pass: process.env.APP_P
       }
     });
-    // Verify email configuration
     transporter.verify((error, success) => {
-      if (error) {
-        console.error('Email configuration error:', error);
-      } else {
-        console.log('Email server is ready to send messages');
-      }
+      if (error) console.error('Email config error:', error);
+      else console.log('Email server ready');
     });
   } else {
-    console.warn('Email configuration missing - APP_E and APP_P environment variables required');
+    console.warn('Email config missing - APP_E and APP_P required');
   }
 } catch (error) {
-  console.error('Failed to create email transporter:', error.message);
+  console.error('Failed to create transporter:', error.message);
 }
+
 // Schemas
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
@@ -74,6 +77,7 @@ const userSchema = new mongoose.Schema({
   verificationExpiry: { type: Date },
   createdAt: { type: Date, default: Date.now }
 });
+
 const profileSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   name: { type: String, default: '' },
@@ -83,28 +87,38 @@ const profileSchema = new mongoose.Schema({
   links: { type: Array, default: [] },
   theme: { type: String, default: 'light' },
   customCSS: { type: String, default: '' },
-  // ✅ Added: badges field to store self-assigned badges
-  badges: { type: Array, default: [], validate: [Array.isArray, 'Badges must be an array'] }
+  badges: { type: Array, default: [], validate: [Array.isArray, 'Badges must be array'] },
+  // ✅ Video Embed
+  videoUrl: { type: String, default: '' },
+  videoPosition: {
+    top: { type: Number, default: 200 },
+    left: { type: Number, default: 50 }
+  }
 });
+
 const emailSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   username: { type: String, required: true }
 });
+
 const usernameHistorySchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   lastUsed: { type: Date, default: Date.now }
 });
+
 const clickSchema = new mongoose.Schema({
   username: { type: String, required: true },
   url: { type: String, required: true },
   count: { type: Number, default: 0 }
 });
+
 const viewSchema = new mongoose.Schema({
   username: { type: String, required: true },
   total: { type: Number, default: 0 },
   daily: { type: Map, of: Number, default: {} },
   ipTracking: { type: Map, of: String, default: {} }
 });
+
 // Models
 const User = mongoose.model('User', userSchema);
 const Profile = mongoose.model('Profile', profileSchema);
@@ -112,11 +126,13 @@ const Email = mongoose.model('Email', emailSchema);
 const UsernameHistory = mongoose.model('UsernameHistory', usernameHistorySchema);
 const Click = mongoose.model('Click', clickSchema);
 const View = mongoose.model('View', viewSchema);
+
 // Helper functions
 function generateJWT(payload) {
   const secret = process.env.JWT_SECRET || 'default_secret_key';
   return jwt.sign(payload, secret, { expiresIn: '24h' });
 }
+
 function verifyJWT(token) {
   const secret = process.env.JWT_SECRET || 'default_secret_key';
   try {
@@ -125,9 +141,11 @@ function verifyJWT(token) {
     return null;
   }
 }
+
 function generateVerificationToken() {
   return uuidv4();
 }
+
 function validateUsername(username) {
   if (!username || username.length < 3 || username.length > 20) {
     return 'Username must be between 3 and 20 characters';
@@ -137,6 +155,7 @@ function validateUsername(username) {
   }
   return null;
 }
+
 function validateEmail(email) {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (!email || !emailRegex.test(email)) {
@@ -144,13 +163,14 @@ function validateEmail(email) {
   }
   return null;
 }
+
 function validatePassword(password) {
   if (!password || password.length < 6) {
     return 'Password must be at least 6 characters';
   }
   return null;
 }
-// Read email template
+
 async function getEmailTemplate(templateType) {
   try {
     const templatePath = path.join(__dirname, 'email.html');
@@ -224,11 +244,11 @@ async function getEmailTemplate(templateType) {
     `;
   }
 }
-// Scheduled cleanup task for unverified accounts
+
 async function cleanupUnverifiedAccounts() {
   try {
     const now = new Date();
-    const cutoffDate = new Date(now.getTime() - 24 * 60 * 60 * 1000); // 24 hours ago
+    const cutoffDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
     const unverifiedUsers = await User.find({
       verified: false,
       createdAt: { $lt: cutoffDate }
@@ -248,10 +268,9 @@ async function cleanupUnverifiedAccounts() {
           await transporter.sendMail(mailOptions);
           console.log(`Warning email sent to unverified user: ${user.email}`);
         }
-        // Schedule deletion after another 24 hours
         setTimeout(async () => {
           await deleteAccount(user.email);
-        }, 24 * 60 * 60 * 1000); // 24 hours
+        }, 24 * 60 * 60 * 1000);
       } catch (emailErr) {
         console.error('Failed to send warning email:', emailErr);
       }
@@ -260,7 +279,7 @@ async function cleanupUnverifiedAccounts() {
     console.error('Cleanup error:', err);
   }
 }
-// Delete account function
+
 async function deleteAccount(email) {
   try {
     const user = await User.findOne({ email });
@@ -286,8 +305,8 @@ async function deleteAccount(email) {
     console.error('Account deletion error:', err);
   }
 }
+
 // Routes
-// Register
 app.post('/api/register', async (req, res) => {
   try {
     const { username, email, password } = req.body;
@@ -328,10 +347,11 @@ app.post('/api/register', async (req, res) => {
       links: [],
       theme: 'light',
       customCSS: '',
-      badges: []  // ✅ Added: initialize badges
+      badges: [],
+      videoUrl: '',
+      videoPosition: { top: 200, left: 50 }
     }).save();
     await new Email({ email, username }).save();
-    // Send verification email
     if (transporter) {
       try {
         const verificationLink = `${BASE_URL}/api/verify-email?token=${verificationToken}`;
@@ -356,7 +376,7 @@ app.post('/api/register', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-// Verify Email — Now redirects to verified.html
+
 app.get('/api/verify-email', async (req, res) => {
   try {
     const { token } = req.query;
@@ -397,7 +417,7 @@ app.get('/api/verify-email', async (req, res) => {
     `);
   }
 });
-// Login
+
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -417,7 +437,7 @@ app.post('/api/login', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-// Get User Profile (with view tracking)
+
 app.get('/api/user/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -449,14 +469,17 @@ app.get('/api/user/:id', async (req, res) => {
       bio: profile.bio,
       links: profile.links,
       theme: profile.theme,
-      badges: profile.badges // ✅ Added: send badges in profile response
+      badges: profile.badges,
+      // ✅ Send video data
+      videoUrl: profile.videoUrl,
+      videoPosition: profile.videoPosition
     });
   } catch (err) {
     console.error('Get profile error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-// Get All Users
+
 app.get('/api/users', async (req, res) => {
   try {
     const profiles = await Profile.find({}, 'username name avatar banner bio links theme badges');
@@ -469,7 +492,7 @@ app.get('/api/users', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-// Update Profile
+
 app.post('/api/user/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -477,7 +500,7 @@ app.post('/api/user/:id', async (req, res) => {
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
     const decoded = verifyJWT(token);
     if (!decoded || decoded.username !== id) return res.status(401).json({ error: 'Unauthorized' });
-    const { name, avatar, banner, bio, links, newUsername, theme, customCSS, badges } = req.body; // ✅ Added: badges
+    const { name, avatar, banner, bio, links, newUsername, theme, customCSS, badges, videoUrl, videoPosition } = req.body;
     const user = await User.findOne({ username: id });
     if (!user) return res.status(404).json({ error: 'User not found' });
     let updatedUsername = id;
@@ -504,9 +527,12 @@ app.post('/api/user/:id', async (req, res) => {
       profile.links = links ?? profile.links;
       profile.theme = theme ?? profile.theme;
       profile.customCSS = customCSS ?? profile.customCSS;
-      // ✅ Added: Save badges if provided and is array
-      if (Array.isArray(badges)) {
-        profile.badges = badges;
+      profile.badges = Array.isArray(badges) ? badges : profile.badges;
+      // ✅ Save video data
+      if (typeof videoUrl !== 'undefined') profile.videoUrl = videoUrl;
+      if (videoPosition && typeof videoPosition.top !== 'undefined' && typeof videoPosition.left !== 'undefined') {
+        profile.videoPosition.top = videoPosition.top;
+        profile.videoPosition.left = videoPosition.left;
       }
       await profile.save();
     }
@@ -517,7 +543,7 @@ app.post('/api/user/:id', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-// Redirect
+
 app.get('/api/redirect/:user/:url', async (req, res) => {
   try {
     const { user, url } = req.params;
@@ -535,7 +561,7 @@ app.get('/api/redirect/:user/:url', async (req, res) => {
     res.redirect(302, '/');
   }
 });
-// Resend Verification Email
+
 app.post('/api/resend-verification', async (req, res) => {
   try {
     const { email } = req.body;
@@ -577,27 +603,22 @@ app.post('/api/resend-verification', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-// ✅ NEW: Get Dashboard Stats (views, clicks, etc.)
+
 app.get('/api/dashboard/:username', async (req, res) => {
   try {
     const { username } = req.params;
-    // Fetch profile
     const profile = await Profile.findOne({ username });
     if (!profile) return res.status(404).json({ error: 'User not found' });
-    // Fetch view data
     const viewRecord = await View.findOne({ username });
     const totalViews = viewRecord?.total || 0;
     const dailyViews = viewRecord?.daily || {};
     const today = new Date().toISOString().split('T')[0];
-    // Calculate views this week (last 7 days)
     const weekAgo = new Date();
     weekAgo.setDate(weekAgo.getDate() - 7);
     const weeklyViews = Object.entries(dailyViews)
       .filter(([date]) => new Date(date) >= weekAgo)
       .reduce((sum, [, count]) => sum + count, 0);
-    // Unique views
     const uniqueViews = Object.keys(viewRecord?.ipTracking || {}).length;
-    // Fetch clicks
     const clickRecords = await Click.find({ username });
     const totalClicks = clickRecords.reduce((sum, c) => sum + c.count, 0);
     const clicksThisWeek = clickRecords
@@ -607,12 +628,10 @@ app.get('/api/dashboard/:username', async (req, res) => {
         return new Date(c.updatedAt) > last7Days;
       })
       .reduce((sum, c) => sum + c.count, 0);
-    // Top 5 links
     const topLinks = clickRecords
       .sort((a, b) => b.count - a.count)
       .slice(0, 5)
       .map(c => ({ title: c.url.split('/').filter(Boolean).pop() || 'Unnamed', url: c.url, clicks: c.count }));
-    // Views timeline for chart
     const timeline = Object.entries(dailyViews)
       .map(([date, count]) => ({ date, count }))
       .sort((a, b) => new Date(a.date) - new Date(b.date));
@@ -632,22 +651,22 @@ app.get('/api/dashboard/:username', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-// Health check
+
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
-// Graceful shutdown
+
 process.on('SIGINT', async () => {
   console.log('Shutting down gracefully...');
   await mongoose.connection.close();
   process.exit(0);
 });
-// Start server
+
 async function startServer() {
   app.listen(PORT, () => {
     console.log(`HostNet API server running on port ${PORT}`);
     cleanupUnverifiedAccounts();
-    setInterval(cleanupUnverifiedAccounts, 24 * 60 * 60 * 1000); // every 24h
+    setInterval(cleanupUnverifiedAccounts, 24 * 60 * 60 * 1000);
   });
 }
 startServer().catch(err => {
