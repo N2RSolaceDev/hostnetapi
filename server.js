@@ -12,20 +12,17 @@ const nodemailer = require('nodemailer');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Base URL for email links
 const BASE_URL = process.env.BASE_URL || 'https://hostnetapi.onrender.com';
 
-// Serve static files
 app.use(express.static(path.join(__dirname)));
-
-// Middleware
+//fix later lmao
 app.use(express.json());
 app.use(cors({
   origin: ['https://hostnet.wiki', 'https://www.hostnet.wiki'],
   credentials: true
 }));
 
-// Rate limiting
+
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
