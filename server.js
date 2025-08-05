@@ -11,17 +11,14 @@ const mongoose = require('mongoose');
 const nodemailer = require('nodemailer');
 const app = express();
 const PORT = process.env.PORT || 3000;
-
 const BASE_URL = process.env.BASE_URL || 'https://hostnetapi.onrender.com';
 
 app.use(express.static(path.join(__dirname)));
-//fix later lmao
 app.use(express.json());
 app.use(cors({
   origin: ['https://hostnet.wiki', 'https://www.hostnet.wiki'],
   credentials: true
 }));
-
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -85,7 +82,6 @@ const profileSchema = new mongoose.Schema({
   theme: { type: String, default: 'light' },
   customCSS: { type: String, default: '' },
   badges: { type: Array, default: [] },
-  // ✅ Video Embed
   videoUrl: { type: String, default: '' },
   videoPosition: {
     top: { type: Number, default: 50 },
@@ -664,6 +660,7 @@ async function startServer() {
     setInterval(cleanupUnverifiedAccounts, 24 * 60 * 60 * 1000);
   });
 }
+
 startServer().catch(err => {
   console.error('Failed to start server:', err);
   process.exit(1);
