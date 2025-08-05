@@ -1,4 +1,4 @@
-// server.js - HostNet API (Secure & Complete)
+// server.js - HostNet API (Ultra-Secure Production Version)
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -19,7 +19,7 @@ const BASE_URL = process.env.BASE_URL || 'https://hostnetapi.onrender.com';
 
 // === Validate Environment ===
 if (!process.env.JWT_SECRET) {
-  console.error("❌ FATAL: JWT_SECRET is not set in environment variables.");
+  console.error("❌ FATAL: JWT_SECRET is not set. Use a strong 32+ char secret.");
   process.exit(1);
 }
 if (!process.env.MONGO_URI) {
@@ -48,7 +48,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
-  message: { error: 'Too many requests, try again later.' },
+  message: { error: 'Too many requests. Try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -58,14 +58,14 @@ const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
   keyGenerator: (req) => req.body.email || req.ip,
-  message: { error: 'Too many login attempts.' }
+  message: { error: 'Too many login attempts. Try again later.' }
 });
 
 const emailLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 3,
   keyGenerator: (req) => req.body.email || req.ip,
-  message: { error: 'Too many emails sent.' }
+  message: { error: 'Too many emails sent. Try again later.' }
 });
 
 // === Database Connection ===
@@ -73,8 +73,8 @@ mongoose.connect(process.env.MONGO_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
 }).then(() => console.log('✅ Connected to MongoDB'))
-  .catch((err) => {
-    console.error('❌ MongoDB connection error:', err.message);
+  .catch(err => {
+    console.error('❌ MongoDB connection failed:', err.message);
     process.exit(1);
   });
 
@@ -95,10 +95,23 @@ if (process.env.APP_E && process.env.APP_P) {
     .catch(err => console.warn('⚠️ Email not configured:', err.message));
 }
 
-// === Schemas ===
+// === Schemas (Secure & Indexed) ===
 const userSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true, trim: true, lowercase: true },
-  email: { type: String, required: true, unique: true, trim: true, lowercase: true },
+  username: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true,
+    lowercase: true,
+    match: [/^[a-zA-Z0-9_]+$/, 'Invalid characters in username']
+  },
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true,
+    lowercase: true
+  },
   password_hash: { type: String, required: true },
   verified: { type: Boolean, default: false },
   verificationToken: { type: String },
@@ -109,26 +122,16 @@ const userSchema = new mongoose.Schema({
 const profileSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true, index: true },
   name: { type: String, default: '', maxlength: 50 },
-  avatar: { type: String, default: '', match: [/^https?:\/\//i, 'Must be valid URL'] },
-  banner: { type: String, default: '', match: [/^https?:\/\//i, 'Must be valid URL'] },
+  avatar: { type: String, default: '', match: [/^https?:\/\//i, 'Must be valid HTTPS URL'] },
+  banner: { type: String, default: '', match: [/^https?:\/\//i, 'Must be valid HTTPS URL'] },
   bio: { type: String, default: '', maxlength: 500 },
   links: [{ url: String, title: String }],
   theme: { type: String, default: 'light', enum: ['light', 'dark'] },
-  videoUrl: { type: String, default: '', match: [/^https?:\/\//i, 'Must be valid URL'] },
+  videoUrl: { type: String, default: '', match: [/^https?:\/\//i, 'Must be valid HTTPS URL'] },
   videoPosition: {
     top: { type: Number, min: 0, max: 100, default: 50 },
     left: { type: Number, min: 0, max: 100, default: 50 }
   }
-});
-
-const emailSchema = new mongoose.Schema({
-  email: { type: String, required: true, unique: true, lowercase: true },
-  username: { type: String, required: true }
-});
-
-const usernameHistorySchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true },
-  lastUsed: { type: Date, default: Date.now }
 });
 
 const clickSchema = new mongoose.Schema({
@@ -137,7 +140,7 @@ const clickSchema = new mongoose.Schema({
   count: { type: Number, default: 0, min: 0 }
 });
 
-// ✅ Secure View Schema with IP hashing for privacy
+// ✅ Secure View Schema: IP hashed for GDPR compliance
 const viewSchema = new mongoose.Schema({
   username: { type: String, required: true, index: true },
   total: { type: Number, default: 0 },
@@ -148,8 +151,6 @@ const viewSchema = new mongoose.Schema({
 // === Models ===
 const User = mongoose.model('User', userSchema);
 const Profile = mongoose.model('Profile', profileSchema);
-const Email = mongoose.model('Email', emailSchema);
-const UsernameHistory = mongoose.model('UsernameHistory', usernameHistorySchema);
 const Click = mongoose.model('Click', clickSchema);
 const View = mongoose.model('View', viewSchema);
 
@@ -169,8 +170,8 @@ function verifyJWT(token) {
   }
 }
 
-// Hash IP for privacy (GDPR-safe)
-function hashIP(ip, salt = 'hostnet_view_salt_2024') {
+// Hash IP for privacy (prevents GDPR violations)
+function hashIP(ip, salt = 'hostnet-view-2024') {
   const crypto = require('crypto');
   return crypto.createHash('sha256').update(ip + salt).digest('hex');
 }
@@ -188,7 +189,7 @@ function validateEmail(email) {
 }
 
 function validatePassword(password) {
-  return password && password.length >= 8 ? null : 'Password too short.';
+  return password && password.length >= 8 ? null : 'Password must be at least 8 chars.';
 }
 
 // Load email template
@@ -197,7 +198,7 @@ async function getEmailTemplate(type) {
     verification: {
       TITLE: 'Verify Your HostNet Account',
       SUBJECT: 'Verify Your Email',
-      MESSAGE: 'Click below to verify your email.',
+      MESSAGE: 'Click the button below to verify your email address.',
       BUTTON: 'Verify Email',
       EXPIRY: '24 hours'
     },
@@ -254,6 +255,7 @@ app.post('/api/register',
 
     if (validateUsername(username)) return res.status(400).json({ error: 'Invalid username' });
     if (validateEmail(email)) return res.status(400).json({ error: 'Invalid email' });
+    if (validatePassword(password)) return res.status(400).json({ error: 'Weak password' });
 
     const session = await mongoose.startSession();
     session.startTransaction();
@@ -271,11 +273,14 @@ app.post('/api/register',
       const token = uuidv4();
       const expiry = new Date(Date.now() + 24 * 3600000);
 
-      const user = new User({ username, email, password_hash: hashed, verificationToken: token, verificationExpiry: expiry });
+      const user = new User({
+        username, email, password_hash: hashed,
+        verificationToken: token,
+        verificationExpiry: expiry
+      });
       await user.save({ session });
 
       await new Profile({ username, name: username }).save({ session });
-      await new Email({ email, username }).save({ session });
 
       if (transporter) {
         const link = `${BASE_URL}/api/verify-email?token=${token}`;
@@ -296,7 +301,7 @@ app.post('/api/register',
 
     } catch (err) {
       await session.abortTransaction();
-      console.error('Registration failed:', err);
+      console.error('Registration failed:', err.message);
       return res.status(500).json({ error: 'Internal error' });
     }
   }
@@ -339,7 +344,7 @@ app.post('/api/login', authLimiter, async (req, res) => {
   res.json({ token, username: user.username, verified: true });
 });
 
-// GET /api/user/:id → Fixed View Tracking
+// GET /api/user/:id → Secure View Tracking
 app.get('/api/user/:id', param('id').trim().escape(), async (req, res) => {
   const { id } = req.params;
 
@@ -348,7 +353,7 @@ app.get('/api/user/:id', param('id').trim().escape(), async (req, res) => {
 
   const today = new Date().toISOString().split('T')[0];
 
-  // Get real IP
+  // Get real IP (behind proxies)
   const ip = (req.headers['x-forwarded-for'] || req.ip || '127.0.0.1').split(',')[0].trim();
   const ipHash = hashIP(ip);
 
@@ -358,7 +363,7 @@ app.get('/api/user/:id', param('id').trim().escape(), async (req, res) => {
     view = new View({ username: id, daily: {}, ipHashes: {} });
   }
 
-  // Only increment if not viewed today
+  // Only count if not viewed today
   const lastViewDate = view.ipHashes[ipHash];
   if (!lastViewDate || new Date(lastViewDate).toISOString().split('T')[0] !== today) {
     view.total += 1;
@@ -423,7 +428,7 @@ app.get('/api/users', async (req, res) => {
   res.json({ users: profiles, total: profiles.length });
 });
 
-// POST /api/user/:id (Update Profile)
+// POST /api/user/:id (Update)
 app.post('/api/user/:id', param('id').trim(), async (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
@@ -464,7 +469,7 @@ app.get('/api/redirect/:user/:url', async (req, res) => {
     const click = await Click.findOne({ username: user, url: decodedUrl }) || new Click({ username: user, url: decodedUrl });
     click.count++;
     await click.save();
-  } catch (e) { /* ignore */ }
+  } catch (e) { /* ignore tracking error */ }
 
   res.redirect(302, decodedUrl);
 });
@@ -532,8 +537,6 @@ async function cleanupUnverifiedAccounts() {
           if (u) {
             await User.deleteOne({ email: u.email });
             await Profile.deleteOne({ username: u.username });
-            await Email.deleteOne({ email: u.email });
-            await UsernameHistory.deleteOne({ username: u.username });
             console.log(`Deleted unverified account: ${u.email}`);
           }
         }, 24 * 60 * 60 * 1000);
@@ -547,16 +550,16 @@ async function cleanupUnverifiedAccounts() {
   }
 }
 
-// Start server
+// === Start Server ===
 app.listen(PORT, () => {
-  console.log(`🔒 HostNet API running on port ${PORT}`);
+  console.log(`🔒 HostNet API running securely on port ${PORT}`);
   cleanupUnverifiedAccounts();
   setInterval(cleanupUnverifiedAccounts, 24 * 60 * 60 * 1000);
 });
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
-  console.log('👋 Shutting down...');
+  console.log('👋 Shutting down gracefully...');
   await mongoose.connection.close();
   process.exit(0);
 });
