@@ -11,7 +11,9 @@ const mongoose = require('mongoose');
 const nodemailer = require('nodemailer');
 const app = express();
 const PORT = process.env.PORT || 3000;
+
 const BASE_URL = process.env.BASE_URL || 'https://hostnetapi.onrender.com';
+
 app.use(express.static(path.join(__dirname)));
 //fix later lmao
 app.use(express.json());
@@ -19,12 +21,15 @@ app.use(cors({
   origin: ['https://hostnet.wiki', 'https://www.hostnet.wiki'],
   credentials: true
 }));
+
+
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
   message: 'Too many requests from this IP'
 });
 app.use(limiter);
+
 // Connect to MongoDB
 const MONGO_URI = process.env.MONGO_URI;
 mongoose.connect(MONGO_URI, {
@@ -36,6 +41,7 @@ mongoose.connect(MONGO_URI, {
     console.error('MongoDB connection error:', err);
     process.exit(1);
   });
+
 // Email transporter
 let transporter = null;
 try {
@@ -57,6 +63,7 @@ try {
 } catch (error) {
   console.error('Failed to create transporter:', error.message);
 }
+
 // Schemas
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
@@ -67,6 +74,7 @@ const userSchema = new mongoose.Schema({
   verificationExpiry: { type: Date },
   createdAt: { type: Date, default: Date.now }
 });
+
 const profileSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   name: { type: String, default: '' },
@@ -84,25 +92,30 @@ const profileSchema = new mongoose.Schema({
     left: { type: Number, default: 50 }
   }
 });
+
 const emailSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   username: { type: String, required: true }
 });
+
 const usernameHistorySchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   lastUsed: { type: Date, default: Date.now }
 });
+
 const clickSchema = new mongoose.Schema({
   username: { type: String, required: true },
   url: { type: String, required: true },
   count: { type: Number, default: 0 }
 });
+
 const viewSchema = new mongoose.Schema({
   username: { type: String, required: true },
   total: { type: Number, default: 0 },
   daily: { type: Map, of: Number, default: {} },
   ipTracking: { type: Map, of: String, default: {} }
 });
+
 // Models
 const User = mongoose.model('User', userSchema);
 const Profile = mongoose.model('Profile', profileSchema);
@@ -110,11 +123,13 @@ const Email = mongoose.model('Email', emailSchema);
 const UsernameHistory = mongoose.model('UsernameHistory', usernameHistorySchema);
 const Click = mongoose.model('Click', clickSchema);
 const View = mongoose.model('View', viewSchema);
+
 // Helper functions
 function generateJWT(payload) {
   const secret = process.env.JWT_SECRET || 'default_secret_key';
   return jwt.sign(payload, secret, { expiresIn: '24h' });
 }
+
 function verifyJWT(token) {
   const secret = process.env.JWT_SECRET || 'default_secret_key';
   try {
@@ -123,9 +138,11 @@ function verifyJWT(token) {
     return null;
   }
 }
+
 function generateVerificationToken() {
   return uuidv4();
 }
+
 function validateUsername(username) {
   if (!username || username.length < 3 || username.length > 20) {
     return 'Username must be between 3 and 20 characters';
@@ -135,6 +152,7 @@ function validateUsername(username) {
   }
   return null;
 }
+
 function validateEmail(email) {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (!email || !emailRegex.test(email)) {
@@ -142,12 +160,14 @@ function validateEmail(email) {
   }
   return null;
 }
+
 function validatePassword(password) {
   if (!password || password.length < 6) {
     return 'Password must be at least 6 characters';
   }
   return null;
 }
+
 async function getEmailTemplate(templateType) {
   try {
     const templatePath = path.join(__dirname, 'email.html');
@@ -221,6 +241,7 @@ async function getEmailTemplate(templateType) {
     `;
   }
 }
+
 async function cleanupUnverifiedAccounts() {
   try {
     const now = new Date();
@@ -255,6 +276,7 @@ async function cleanupUnverifiedAccounts() {
     console.error('Cleanup error:', err);
   }
 }
+
 async function deleteAccount(email) {
   try {
     const user = await User.findOne({ email });
@@ -280,6 +302,7 @@ async function deleteAccount(email) {
     console.error('Account deletion error:', err);
   }
 }
+
 // Routes
 app.post('/api/register', async (req, res) => {
   try {
@@ -350,6 +373,7 @@ app.post('/api/register', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
 app.get('/api/verify-email', async (req, res) => {
   try {
     const { token } = req.query;
@@ -390,6 +414,7 @@ app.get('/api/verify-email', async (req, res) => {
     `);
   }
 });
+
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -409,6 +434,7 @@ app.post('/api/login', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
 app.get('/api/user/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -449,6 +475,7 @@ app.get('/api/user/:id', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
 app.get('/api/users', async (req, res) => {
   try {
     const profiles = await Profile.find({}, 'username name avatar banner bio links theme badges');
@@ -461,6 +488,7 @@ app.get('/api/users', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
 app.post('/api/user/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -510,6 +538,7 @@ app.post('/api/user/:id', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
 app.get('/api/redirect/:user/:url', async (req, res) => {
   try {
     const { user, url } = req.params;
@@ -527,6 +556,7 @@ app.get('/api/redirect/:user/:url', async (req, res) => {
     res.redirect(302, '/');
   }
 });
+
 app.post('/api/resend-verification', async (req, res) => {
   try {
     const { email } = req.body;
@@ -568,6 +598,7 @@ app.post('/api/resend-verification', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
 app.get('/api/dashboard/:username', async (req, res) => {
   try {
     const { username } = req.params;
@@ -616,76 +647,16 @@ app.get('/api/dashboard/:username', async (req, res) => {
   }
 });
 
-// NEW: Account Deletion Route
-app.post('/api/delete-account', async (req, res) => {
-  try {
-    const { password } = req.body;
-    const token = req.headers.authorization?.split(' ')[1];
-    
-    if (!token) return res.status(401).json({ error: 'Unauthorized' });
-    
-    const decoded = verifyJWT(token);
-    if (!decoded) return res.status(401).json({ error: 'Invalid token' });
-    
-    const username = decoded.username;
-    const user = await User.findOne({ username });
-    
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    
-    // Verify password
-    if (!password) return res.status(400).json({ error: 'Password is required' });
-    
-    const isValid = await bcrypt.compare(password, user.password_hash);
-    if (!isValid) return res.status(401).json({ error: 'Incorrect password' });
-    
-    // Send deletion confirmation email if configured
-    if (transporter) {
-      try {
-        const template = await getEmailTemplate('deleted');
-        const emailContent = template.replace(/\[VERIFICATION_LINK\]/g, `${BASE_URL}/api/register`);
-        const mailOptions = {
-          from: process.env.APP_E,
-          to: user.email,
-          subject: 'Your HostNet Account Has Been Deleted',
-          html: emailContent
-        };
-        await transporter.sendMail(mailOptions);
-        console.log(`Deletion confirmation email sent to: ${user.email}`);
-      } catch (err) {
-        console.error('Failed to send deletion email:', err);
-      }
-    }
-    
-    // Delete all associated data
-    await User.deleteOne({ username });
-    await Profile.deleteOne({ username });
-    await Email.deleteOne({ email: user.email });
-    await UsernameHistory.deleteOne({ username });
-    await Click.deleteMany({ username });
-    await View.deleteOne({ username });
-    
-    console.log(`Account deleted for user: ${username}`);
-    
-    // Clear authentication data
-    res.json({ 
-      success: true, 
-      message: 'Account deleted successfully' 
-    });
-    
-  } catch (err) {
-    console.error('Account deletion error:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
+
 process.on('SIGINT', async () => {
   console.log('Shutting down gracefully...');
   await mongoose.connection.close();
   process.exit(0);
 });
+
 async function startServer() {
   app.listen(PORT, () => {
     console.log(`HostNet API server running on port ${PORT}`);
