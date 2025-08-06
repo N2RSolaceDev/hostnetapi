@@ -9,19 +9,17 @@ const rateLimit = require('express-rate-limit');
 const { v4: uuidv4 } = require('uuid');
 const mongoose = require('mongoose');
 const nodemailer = require('nodemailer');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
-
 const BASE_URL = process.env.BASE_URL || 'https://hostnetapi.onrender.com';
 
 app.use(express.static(path.join(__dirname)));
-//fix later lmao
 app.use(express.json());
 app.use(cors({
   origin: ['https://hostnet.wiki', 'https://www.hostnet.wiki'],
   credentials: true
 }));
-
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -85,7 +83,6 @@ const profileSchema = new mongoose.Schema({
   theme: { type: String, default: 'light' },
   customCSS: { type: String, default: '' },
   badges: { type: Array, default: [] },
-  // ✅ Video Embed
   videoUrl: { type: String, default: '' },
   videoPosition: {
     top: { type: Number, default: 50 },
@@ -242,6 +239,44 @@ async function getEmailTemplate(templateType) {
   }
 }
 
+async function getDeletionTemplate() {
+  try {
+    const templatePath = path.join(__dirname, 'email-delete.html');
+    let template = await fs.readFile(templatePath, 'utf8');
+    return template;
+  } catch (err) {
+    console.error('Error reading deletion email template:', err);
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <style>
+          body { font-family: Arial, sans-serif; background-color: #f5f5f5; }
+          .container { max-width: 600px; margin: 0 auto; background-color: white; padding: 20px; border-radius: 8px; }
+          .header { background-color: #e53e3e; color: white; padding: 20px; text-align: center; }
+          .content { padding: 20px; }
+          .button { display: inline-block; padding: 12px 24px; background-color: #e53e3e; color: white; text-decoration: none; border-radius: 4px; margin: 20px 0; }
+          .footer { padding: 20px; text-align: center; color: #888; font-size: 12px; }
+          .warning { color: #e53e3e; font-weight: bold; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header"><h1>Confirm Account Deletion</h1></div>
+          <p>You requested to delete your account. This action is <span class="warning">permanent and cannot be undone</span>.</p>
+          <a href="[DELETE_CONFIRM_LINK]" class="button">Delete My Account</a>
+          <p>This link will expire in 1 hour.</p>
+          <p>If you did not request this, ignore this email.</p>
+          <div class="footer">
+            <p>&copy; 2025 HostNet. All rights reserved.</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+  }
+}
+
 async function cleanupUnverifiedAccounts() {
   try {
     const now = new Date();
@@ -281,6 +316,7 @@ async function deleteAccount(email) {
   try {
     const user = await User.findOne({ email });
     if (!user) return;
+
     if (transporter) {
       const template = await getEmailTemplate('deleted');
       const emailContent = template.replace(/\[VERIFICATION_LINK\]/g, `${BASE_URL}/api/register`);
@@ -291,19 +327,25 @@ async function deleteAccount(email) {
         html: emailContent
       };
       await transporter.sendMail(mailOptions);
-      console.log(`Deleted email sent to: ${email}`);
+      console.log(`Account deleted email sent to: ${email}`);
     }
+
     await User.deleteOne({ email });
     await Profile.deleteOne({ username: user.username });
     await Email.deleteOne({ email });
     await UsernameHistory.deleteOne({ username: user.username });
-    console.log(`Account deleted for email: ${email}`);
+    await Click.deleteMany({ username: user.username });
+    await View.deleteMany({ username: user.username });
+
+    console.log(`Account and all data deleted for: ${email}`);
   } catch (err) {
     console.error('Account deletion error:', err);
   }
 }
 
 // Routes
+
+// ✅ Register
 app.post('/api/register', async (req, res) => {
   try {
     const { username, email, password } = req.body;
@@ -313,8 +355,10 @@ app.post('/api/register', async (req, res) => {
     if (usernameError) return res.status(400).json({ error: usernameError });
     if (emailError) return res.status(400).json({ error: emailError });
     if (passwordError) return res.status(400).json({ error: passwordError });
+
     const existingEmail = await Email.findOne({ email });
     if (existingEmail) return res.status(400).json({ error: 'Email already registered' });
+
     const usernameHistory = await UsernameHistory.findOne({ username });
     if (usernameHistory) {
       const lastUsed = new Date(usernameHistory.lastUsed);
@@ -322,11 +366,14 @@ app.post('/api/register', async (req, res) => {
       const diffDays = Math.floor((now - lastUsed) / (1000 * 60 * 60 * 24));
       if (diffDays < 7) return res.status(400).json({ error: 'Username is on cooldown' });
     }
+
     const existingUser = await User.findOne({ username });
     if (existingUser) return res.status(400).json({ error: 'Username already taken' });
+
     const hashedPassword = await bcrypt.hash(password, 12);
     const verificationToken = generateVerificationToken();
     const verificationExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
     const newUser = new User({
       username,
       email,
@@ -335,6 +382,7 @@ app.post('/api/register', async (req, res) => {
       verificationExpiry
     });
     await newUser.save();
+
     await new Profile({
       username,
       name: username,
@@ -348,7 +396,9 @@ app.post('/api/register', async (req, res) => {
       videoUrl: '',
       videoPosition: { top: 50, left: 50 }
     }).save();
+
     await new Email({ email, username }).save();
+
     if (transporter) {
       try {
         const verificationLink = `${BASE_URL}/api/verify-email?token=${verificationToken}`;
@@ -366,6 +416,7 @@ app.post('/api/register', async (req, res) => {
         console.error('Failed to send verification email:', err);
       }
     }
+
     const token = generateJWT({ username, iss: 'hostnet', aud: 'hostnet-users' });
     res.json({ token, username, verified: false });
   } catch (err) {
@@ -374,6 +425,7 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
+// ✅ Verify Email
 app.get('/api/verify-email', async (req, res) => {
   try {
     const { token } = req.query;
@@ -415,6 +467,7 @@ app.get('/api/verify-email', async (req, res) => {
   }
 });
 
+// ✅ Login
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -422,11 +475,14 @@ app.post('/api/login', async (req, res) => {
     const passwordError = validatePassword(password);
     if (emailError) return res.status(400).json({ error: emailError });
     if (passwordError) return res.status(400).json({ error: passwordError });
+
     const user = await User.findOne({ email });
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
     if (!user.verified) return res.status(401).json({ error: 'Please verify your email first' });
+
     const isValid = await bcrypt.compare(password, user.password_hash);
     if (!isValid) return res.status(401).json({ error: 'Invalid credentials' });
+
     const token = generateJWT({ username: user.username });
     res.json({ token, username: user.username, verified: user.verified });
   } catch (err) {
@@ -435,11 +491,13 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
+// ✅ Get User Profile
 app.get('/api/user/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const profile = await Profile.findOne({ username: id });
     if (!profile) return res.status(404).json({ error: 'User not found' });
+
     try {
       let viewRecord = await View.findOne({ username: id });
       if (!viewRecord) {
@@ -459,6 +517,7 @@ app.get('/api/user/:id', async (req, res) => {
     } catch (err) {
       console.error('View tracking failed:', err);
     }
+
     res.json({
       name: profile.name,
       avatar: profile.avatar,
@@ -476,29 +535,20 @@ app.get('/api/user/:id', async (req, res) => {
   }
 });
 
-app.get('/api/users', async (req, res) => {
-  try {
-    const profiles = await Profile.find({}, 'username name avatar banner bio links theme badges');
-    res.json({
-      users: profiles.map(p => p.toObject()),
-      total: profiles.length
-    });
-  } catch (err) {
-    console.error('Get all users error:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
+// ✅ Update Profile
 app.post('/api/user/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const token = req.headers.authorization?.split(' ')[1];
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
+
     const decoded = verifyJWT(token);
     if (!decoded || decoded.username !== id) return res.status(401).json({ error: 'Unauthorized' });
+
     const { name, avatar, banner, bio, links, newUsername, theme, customCSS, badges, videoUrl, videoPosition } = req.body;
     const user = await User.findOne({ username: id });
     if (!user) return res.status(404).json({ error: 'User not found' });
+
     let updatedUsername = id;
     if (newUsername && newUsername !== id) {
       if (validateUsername(newUsername)) return res.status(400).json({ error: validateUsername(newUsername) });
@@ -507,6 +557,7 @@ app.post('/api/user/:id', async (req, res) => {
         return res.status(400).json({ error: 'Username is on cooldown' });
       }
       if (await User.findOne({ username: newUsername })) return res.status(400).json({ error: 'Username already taken' });
+
       user.username = newUsername;
       await user.save();
       await Email.findOneAndUpdate({ username: id }, { username: newUsername });
@@ -514,6 +565,7 @@ app.post('/api/user/:id', async (req, res) => {
       await new UsernameHistory({ username: id, lastUsed: new Date() }).save();
       updatedUsername = newUsername;
     }
+
     const profile = await Profile.findOne({ username: updatedUsername });
     if (profile) {
       profile.name = name ?? profile.name;
@@ -531,6 +583,7 @@ app.post('/api/user/:id', async (req, res) => {
       }
       await profile.save();
     }
+
     const newToken = updatedUsername !== id ? generateJWT({ username: updatedUsername }) : token;
     res.json({ token: newToken, username: updatedUsername });
   } catch (err) {
@@ -539,6 +592,7 @@ app.post('/api/user/:id', async (req, res) => {
   }
 });
 
+// ✅ Redirect & Track Click
 app.get('/api/redirect/:user/:url', async (req, res) => {
   try {
     const { user, url } = req.params;
@@ -557,11 +611,13 @@ app.get('/api/redirect/:user/:url', async (req, res) => {
   }
 });
 
+// ✅ Resend Verification
 app.post('/api/resend-verification', async (req, res) => {
   try {
     const { email } = req.body;
     const emailError = validateEmail(email);
     if (emailError) return res.status(400).json({ error: emailError });
+
     const user = await User.findOne({ email });
     if (!user) {
       return res.json({ message: 'If your email is registered and unverified, a new verification link has been sent.' });
@@ -569,11 +625,13 @@ app.post('/api/resend-verification', async (req, res) => {
     if (user.verified) {
       return res.json({ message: 'This email is already verified.' });
     }
+
     const newVerificationToken = generateVerificationToken();
     const newVerificationExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
     user.verificationToken = newVerificationToken;
     user.verificationExpiry = newVerificationExpiry;
     await user.save();
+
     if (transporter) {
       try {
         const verificationLink = `${BASE_URL}/api/verify-email?token=${newVerificationToken}`;
@@ -599,11 +657,13 @@ app.post('/api/resend-verification', async (req, res) => {
   }
 });
 
+// ✅ Dashboard Stats
 app.get('/api/dashboard/:username', async (req, res) => {
   try {
     const { username } = req.params;
     const profile = await Profile.findOne({ username });
     if (!profile) return res.status(404).json({ error: 'User not found' });
+
     const viewRecord = await View.findOne({ username });
     const totalViews = viewRecord?.total || 0;
     const dailyViews = viewRecord?.daily || {};
@@ -614,6 +674,7 @@ app.get('/api/dashboard/:username', async (req, res) => {
       .filter(([date]) => new Date(date) >= weekAgo)
       .reduce((sum, [, count]) => sum + count, 0);
     const uniqueViews = Object.keys(viewRecord?.ipTracking || {}).length;
+
     const clickRecords = await Click.find({ username });
     const totalClicks = clickRecords.reduce((sum, c) => sum + c.count, 0);
     const clicksThisWeek = clickRecords
@@ -623,13 +684,16 @@ app.get('/api/dashboard/:username', async (req, res) => {
         return new Date(c.updatedAt) > last7Days;
       })
       .reduce((sum, c) => sum + c.count, 0);
+
     const topLinks = clickRecords
       .sort((a, b) => b.count - a.count)
       .slice(0, 5)
       .map(c => ({ title: c.url.split('/').filter(Boolean).pop() || 'Unnamed', url: c.url, clicks: c.count }));
+
     const timeline = Object.entries(dailyViews)
       .map(([date, count]) => ({ date, count }))
       .sort((a, b) => new Date(a.date) - new Date(b.date));
+
     res.json({
       stats: {
         totalViews,
@@ -647,16 +711,111 @@ app.get('/api/dashboard/:username', async (req, res) => {
   }
 });
 
+// ✅ Health Check
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
+// ✅ NEW: Initiate Account Deletion
+app.post('/api/account/delete', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password required' });
+    }
+
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.json({ message: 'If your account exists, a deletion link has been sent.' });
+    }
+
+    const isValid = await bcrypt.compare(password, user.password_hash);
+    if (!isValid) {
+      return res.status(401).json({ error: 'Invalid password' });
+    }
+
+    const deleteToken = uuidv4();
+    const deleteExpiry = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+    user.verificationToken = deleteToken;
+    user.verificationExpiry = deleteExpiry;
+    await user.save();
+
+    if (transporter) {
+      const confirmLink = `${BASE_URL}/api/account/confirm-delete?token=${deleteToken}`;
+      const template = await getDeletionTemplate();
+      const emailContent = template.replace(/\[DELETE_CONFIRM_LINK\]/g, confirmLink);
+
+      const mailOptions = {
+        from: process.env.APP_E,
+        to: email,
+        subject: 'Confirm Your Account Deletion',
+        html: emailContent
+      };
+
+      await transporter.sendMail(mailOptions);
+      console.log(`Deletion confirmation sent to: ${email}`);
+    }
+
+    res.json({ message: 'A confirmation link has been sent to your email.' });
+  } catch (err) {
+    console.error('Account deletion initiation error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ✅ NEW: Confirm Deletion via Email Link
+app.get('/api/account/confirm-delete', async (req, res) => {
+  try {
+    const { token } = req.query;
+    if (!token) {
+      return res.status(400).send(`
+        <h1>Invalid Request</h1>
+        <p>No deletion token provided.</p>
+        <a href="/">Go Home</a>
+      `);
+    }
+
+    const user = await User.findOne({
+      verificationToken: token,
+      verificationExpiry: { $gt: new Date() }
+    });
+
+    if (!user) {
+      return res.status(400).send(`
+        <h1>Invalid or Expired Link</h1>
+        <p>The deletion link is invalid or has expired.</p>
+        <a href="/">Go Home</a>
+      `);
+    }
+
+    const email = user.email;
+    await deleteAccount(email);
+
+    res.send(`
+      <h1>Account Deleted</h1>
+      <p>Your account has been permanently deleted.</p>
+      <p>Thank you for using HostNet.</p>
+      <a href="/">Go Home</a>
+    `);
+  } catch (err) {
+    console.error('Account deletion confirmation error:', err);
+    res.status(500).send(`
+      <h1>Server Error</h1>
+      <p>Something went wrong. Please contact support.</p>
+      <a href="/">Go Home</a>
+    `);
+  }
+});
+
+// Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('Shutting down gracefully...');
   await mongoose.connection.close();
   process.exit(0);
 });
 
+// Start server
 async function startServer() {
   app.listen(PORT, () => {
     console.log(`HostNet API server running on port ${PORT}`);
@@ -664,6 +823,7 @@ async function startServer() {
     setInterval(cleanupUnverifiedAccounts, 24 * 60 * 60 * 1000);
   });
 }
+
 startServer().catch(err => {
   console.error('Failed to start server:', err);
   process.exit(1);
