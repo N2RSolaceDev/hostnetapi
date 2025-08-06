@@ -9,7 +9,6 @@ const rateLimit = require('express-rate-limit');
 const { v4: uuidv4 } = require('uuid');
 const mongoose = require('mongoose');
 const nodemailer = require('nodemailer');
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || 'https://hostnetapi.onrender.com';
@@ -343,8 +342,49 @@ async function deleteAccount(email) {
   }
 }
 
-// Routes
+// ✅ GET /api/users - Public directory of verified users
+const usersLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 50,
+  message: 'Too many requests to user directory',
+  keyGenerator: (req) => req.ip
+});
 
+app.use('/api/users', usersLimiter);
+
+app.get('/api/users', async (req, res) => {
+  try {
+    const { search, limit = 20, offset = 0 } = req.query;
+
+    // Build query
+    let query = { verified: true };
+    if (search) {
+      const regex = new RegExp(search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      query.username = regex;
+    }
+
+    // Fetch users
+    const profiles = await Profile.find(query)
+      .select('username name avatar bio badges')
+      .sort({ createdAt: -1 })
+      .skip(parseInt(offset))
+      .limit(parseInt(limit));
+
+    const total = await Profile.countDocuments(query);
+
+    res.json({
+      users: profiles,
+      total,
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    });
+  } catch (err) {
+    console.error('Get users list error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Routes
 // ✅ Register
 app.post('/api/register', async (req, res) => {
   try {
@@ -381,6 +421,7 @@ app.post('/api/register', async (req, res) => {
       verificationToken,
       verificationExpiry
     });
+
     await newUser.save();
 
     await new Profile({
@@ -436,6 +477,7 @@ app.get('/api/verify-email', async (req, res) => {
         <a href="/">Go Home</a>
       `);
     }
+
     const user = await User.findOne({ verificationToken: token });
     if (!user) {
       return res.status(400).send(`
@@ -444,6 +486,7 @@ app.get('/api/verify-email', async (req, res) => {
         <a href="/resend.html">Request a new link</a>
       `);
     }
+
     if (user.verificationExpiry < new Date()) {
       return res.status(400).send(`
         <h1>Link Expired</h1>
@@ -451,10 +494,12 @@ app.get('/api/verify-email', async (req, res) => {
         <a href="/resend.html">Click here to resend</a>
       `);
     }
+
     user.verified = true;
     user.verificationToken = undefined;
     user.verificationExpiry = undefined;
     await user.save();
+
     console.log(`Email verified for: ${user.email}`);
     res.redirect(302, '/verified.html');
   } catch (err) {
@@ -552,10 +597,12 @@ app.post('/api/user/:id', async (req, res) => {
     let updatedUsername = id;
     if (newUsername && newUsername !== id) {
       if (validateUsername(newUsername)) return res.status(400).json({ error: validateUsername(newUsername) });
+
       const history = await UsernameHistory.findOne({ username: newUsername });
       if (history && (Date.now() - new Date(history.lastUsed)) / (1000 * 60 * 60 * 24) < 7) {
         return res.status(400).json({ error: 'Username is on cooldown' });
       }
+
       if (await User.findOne({ username: newUsername })) return res.status(400).json({ error: 'Username already taken' });
 
       user.username = newUsername;
@@ -597,6 +644,7 @@ app.get('/api/redirect/:user/:url', async (req, res) => {
   try {
     const { user, url } = req.params;
     const decodedUrl = decodeURIComponent(url);
+
     try {
       const click = await Click.findOne({ username: user, url: decodedUrl }) || new Click({ username: user, url: decodedUrl });
       click.count++;
@@ -604,6 +652,7 @@ app.get('/api/redirect/:user/:url', async (req, res) => {
     } catch (err) {
       console.error('Click tracking failed:', err);
     }
+
     res.redirect(302, decodedUrl);
   } catch (err) {
     console.error('Redirect error:', err);
@@ -650,6 +699,7 @@ app.post('/api/resend-verification', async (req, res) => {
         return res.status(500).json({ error: 'Failed to send email. Please try again later.' });
       }
     }
+
     res.json({ message: 'A new verification link has been sent to your email.' });
   } catch (err) {
     console.error('Resend verification error:', err);
@@ -716,7 +766,7 @@ app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
-// ✅ NEW: Initiate Account Deletion
+// ✅ Initiate Account Deletion
 app.post('/api/account/delete', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -736,7 +786,6 @@ app.post('/api/account/delete', async (req, res) => {
 
     const deleteToken = uuidv4();
     const deleteExpiry = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
-
     user.verificationToken = deleteToken;
     user.verificationExpiry = deleteExpiry;
     await user.save();
@@ -745,14 +794,12 @@ app.post('/api/account/delete', async (req, res) => {
       const confirmLink = `${BASE_URL}/api/account/confirm-delete?token=${deleteToken}`;
       const template = await getDeletionTemplate();
       const emailContent = template.replace(/\[DELETE_CONFIRM_LINK\]/g, confirmLink);
-
       const mailOptions = {
         from: process.env.APP_E,
         to: email,
         subject: 'Confirm Your Account Deletion',
         html: emailContent
       };
-
       await transporter.sendMail(mailOptions);
       console.log(`Deletion confirmation sent to: ${email}`);
     }
@@ -764,7 +811,7 @@ app.post('/api/account/delete', async (req, res) => {
   }
 });
 
-// ✅ NEW: Confirm Deletion via Email Link
+// ✅ Confirm Deletion via Email Link
 app.get('/api/account/confirm-delete', async (req, res) => {
   try {
     const { token } = req.query;
